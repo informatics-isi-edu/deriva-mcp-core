@@ -29,6 +29,14 @@ def test_package_imports() -> None:
         "deriva_mcp_core.tools.entity",
         "deriva_mcp_core.tools.hatrac",
         "deriva_mcp_core.tools.query",
+        "deriva_mcp_core.rag",
+        "deriva_mcp_core.rag.config",
+        "deriva_mcp_core.rag.store",
+        "deriva_mcp_core.rag.chunker",
+        "deriva_mcp_core.rag.crawler",
+        "deriva_mcp_core.rag.docs",
+        "deriva_mcp_core.rag.schema",
+        "deriva_mcp_core.rag.data",
     ]
     for module in modules:
         assert importlib.import_module(module) is not None, f"failed to import {module}"
