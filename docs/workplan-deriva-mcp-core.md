@@ -144,11 +144,11 @@ request.
 
 Markdown documentation from four core DERIVA GitHub repositories:
 
-| Source name       | Repository  | Path prefix |
-|-------------------|-------------|-------------|
-| `deriva-py-docs`  | deriva-py   | docs/       |
-| `ermrest-docs`    | ermrest     | docs/       |
-| `chaise-docs`     | chaise      | docs/       |
+| Source name      | Repository | Path prefix |
+|------------------|------------|-------------|
+| `deriva-py-docs` | deriva-py  | docs/       |
+| `ermrest-docs`   | ermrest    | docs/       |
+| `chaise-docs`    | chaise     | docs/       |
 
 These repositories are public and contain the authoritative DERIVA API reference, user
 guides, and integration documentation. The docs index is shared across all users and
@@ -225,21 +225,27 @@ concrete ChromaDB or pgvector dependency:
 
 ```python
 class VectorStore(Protocol):
+
     def upsert(self, chunks: list[Chunk]) -> None: ...
+
     def search(self, query: str, filters: dict, limit: int) -> list[SearchResult]: ...
+
     def delete_source(self, source_name: str) -> None: ...
+
     def has_source(self, source_name: str) -> bool: ...
 ```
 
 Two implementations are shipped with core:
 
 **`ChromaVectorStore`** (default for development):
+
 - Embedded ChromaDB, zero additional services
 - Persistent local storage, configurable via `DERIVA_MCP_RAG_CHROMA_DIR`
 - Also supports ChromaDB server mode via `DERIVA_MCP_RAG_CHROMA_URL`
 - Suitable for single-instance deployments and local development
 
 **`PgVectorStore`** (recommended for production):
+
 - PostgreSQL with the `pgvector` extension
 - Configured via `DERIVA_MCP_RAG_PG_DSN`
 - No new services required when DERIVA's existing PostgreSQL is reachable
@@ -297,15 +303,15 @@ variables and optional `.env` file override.
 
 **RAG:**
 
-| Variable                        | Required | Default    | Description                                              |
-|---------------------------------|----------|------------|----------------------------------------------------------|
-| `DERIVA_MCP_RAG_ENABLED`        | No       | `true`     | Enable or disable the RAG subsystem entirely             |
-| `DERIVA_MCP_RAG_VECTOR_BACKEND` | No       | `chroma`   | Vector store backend: `chroma` or `pgvector`             |
-| `DERIVA_MCP_RAG_CHROMA_DIR`     | No       | `~/.deriva-mcp/rag` | Embedded ChromaDB persistence directory (`chroma` backend) |
-| `DERIVA_MCP_RAG_CHROMA_URL`     | No       | --         | ChromaDB server URL (overrides dir, enables server mode) |
-| `DERIVA_MCP_RAG_PG_DSN`         | No       | --         | PostgreSQL DSN for pgvector backend                      |
-| `DERIVA_MCP_RAG_AUTO_UPDATE`    | No       | `false`    | Re-crawl documentation sources at server startup         |
-| `DERIVA_MCP_RAG_DATA_TTL_SECONDS` | No     | `3600`     | Data index staleness TTL; reindex if older than this     |
+| Variable                          | Required | Default             | Description                                                |
+|-----------------------------------|----------|---------------------|------------------------------------------------------------|
+| `DERIVA_MCP_RAG_ENABLED`          | No       | `true`              | Enable or disable the RAG subsystem entirely               |
+| `DERIVA_MCP_RAG_VECTOR_BACKEND`   | No       | `chroma`            | Vector store backend: `chroma` or `pgvector`               |
+| `DERIVA_MCP_RAG_CHROMA_DIR`       | No       | `~/.deriva-mcp/rag` | Embedded ChromaDB persistence directory (`chroma` backend) |
+| `DERIVA_MCP_RAG_CHROMA_URL`       | No       | --                  | ChromaDB server URL (overrides dir, enables server mode)   |
+| `DERIVA_MCP_RAG_PG_DSN`           | No       | --                  | PostgreSQL DSN for pgvector backend                        |
+| `DERIVA_MCP_RAG_AUTO_UPDATE`      | No       | `false`             | Re-crawl documentation sources at server startup           |
+| `DERIVA_MCP_RAG_DATA_TTL_SECONDS` | No       | `3600`              | Data index staleness TTL; reindex if older than this       |
 
 Resource identifiers may be HTTPS URIs or URNs; Credenza accepts both.
 
@@ -648,11 +654,13 @@ and call `index_table_data()` with their own serializer from a lifecycle hook:
 # in a plugin's register(ctx):
 from deriva_mcp_core.rag.data import index_table_data, RowSerializer
 
+
 class MySerializer:
     def serialize(self, table_name: str, row: dict) -> str | None:
         if table_name == "Dataset":
             return _rich_dataset_markdown(row)
         return None  # fall back to generic for other tables
+
 
 ctx.on_catalog_connect(_reindex_data)
 ```
@@ -672,6 +680,7 @@ ctx.on_catalog_connect(_reindex_data)
 ```python
 # in rag/__init__.py register(ctx):
 ctx.on_catalog_connect(_handle_catalog_connect)
+
 
 async def _handle_catalog_connect(hostname, catalog_id, schema_hash, schema_json):
     if not rag_manager.has_schema(hostname, catalog_id, schema_hash):
