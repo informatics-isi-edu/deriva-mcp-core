@@ -12,10 +12,13 @@ import pytest
 
 from deriva_mcp_core.context import (
     _current_credential,
+    _current_user_id,
     get_deriva_server,
     get_hatrac_store,
     get_request_credential,
+    get_request_user_id,
     set_current_credential,
+    set_current_user_id,
 )
 
 # ---------------------------------------------------------------------------
@@ -173,3 +176,54 @@ def test_get_hatrac_store_returns_object_with_credential():
         assert isinstance(store, HatracStore)
 
     _run_isolated(check)
+
+
+# ---------------------------------------------------------------------------
+# get_request_user_id / set_current_user_id
+# ---------------------------------------------------------------------------
+
+
+def test_get_request_user_id_default_is_stdio():
+    """get_request_user_id() returns 'stdio' when no user id has been set."""
+
+    def check():
+        _current_user_id.set("stdio")  # reset to default in isolated ctx
+        assert get_request_user_id() == "stdio"
+
+    _run_isolated(check)
+
+
+def test_set_current_user_id_roundtrip():
+    """set_current_user_id() / get_request_user_id() roundtrip."""
+
+    def check():
+        set_current_user_id("user@example.org")
+        assert get_request_user_id() == "user@example.org"
+
+    _run_isolated(check)
+
+
+def test_user_id_is_context_local():
+    """User ID set in one context does not bleed into a sibling context."""
+    outer_result = {}
+
+    def outer():
+        set_current_user_id("outer-user")
+
+        inner_result = {}
+
+        def inner():
+            _current_user_id.set("stdio")  # reset in inner context
+            inner_result["uid"] = get_request_user_id()
+
+        ctx = contextvars.copy_context()
+        ctx.run(inner)
+
+        outer_result["uid"] = get_request_user_id()
+        outer_result["inner_uid"] = inner_result["uid"]
+
+    ctx = contextvars.copy_context()
+    ctx.run(outer)
+
+    assert outer_result["uid"] == "outer-user"
+    assert outer_result["inner_uid"] == "stdio"

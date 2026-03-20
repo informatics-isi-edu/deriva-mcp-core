@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Built-in ERMREST tool modules for deriva-mcp-core.
 
 Each module exposes a register(ctx: PluginContext) function following the same
@@ -11,4 +13,3 @@ Modules:
     hatrac   -- Hatrac object store basics
 """
 
-from __future__ import annotations

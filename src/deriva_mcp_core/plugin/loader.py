@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Plugin discovery and registration via Python entry points.
 
 Scans the 'deriva_mcp.plugins' entry point group and calls each plugin's
@@ -7,11 +9,9 @@ Plugins are loaded after built-in tool modules are registered, so built-in tool
 names take precedence over any conflicting plugin tool names.
 """
 
-from __future__ import annotations
-
 import logging
-
-from deriva_mcp_core.plugin.api import PluginContext
+from importlib.metadata import entry_points
+from .api import PluginContext
 
 logger = logging.getLogger(__name__)
 
@@ -22,4 +22,11 @@ def load_plugins(ctx: PluginContext) -> None:
     Args:
         ctx: The shared PluginContext wrapping the FastMCP instance.
     """
-    # TODO (Phase 3): implement entry point discovery via importlib.metadata
+    eps = entry_points(group="deriva_mcp.plugins")
+    for ep in eps:
+        try:
+            register_fn = ep.load()
+            register_fn(ctx)
+            logger.info("Loaded plugin: %s (%s)", ep.name, ep.value)
+        except Exception:
+            logger.exception("Failed to load plugin: %s (%s)", ep.name, ep.value)

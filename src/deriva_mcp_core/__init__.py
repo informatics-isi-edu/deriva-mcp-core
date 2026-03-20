@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """deriva-mcp-core -- Reference implementation MCP server for the DERIVA platform.
 
 Public API (import from deriva_mcp_core):
@@ -15,10 +17,24 @@ Public API (import from deriva_mcp_core):
         a higher-level API that constructs its own client:
             DerivaML(hostname, catalog_id, credential=get_request_credential())
         Distinct from deriva.core.get_credential() which reads from local disk.
+
+    get_request_user_id()
+        Returns the user identity (sub) for the current request context.
+        In HTTP mode this is the sub from Credenza token introspection.
+        In stdio mode returns "stdio".
 """
 
-from __future__ import annotations
 
-from deriva_mcp_core.context import get_deriva_server, get_hatrac_store, get_request_credential
+from .context import (
+    get_deriva_server,
+    get_hatrac_store,
+    get_request_credential,
+    get_request_user_id,
+)
 
-__all__ = ["get_deriva_server", "get_hatrac_store", "get_request_credential"]
+__all__ = [
+    "get_deriva_server",
+    "get_hatrac_store",
+    "get_request_credential",
+    "get_request_user_id",
+]

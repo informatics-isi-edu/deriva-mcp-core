@@ -48,6 +48,16 @@ Import paths always start from `deriva_mcp_core`, never relative.
 - `tools/` -- built-in DERIVA tool modules, each with `register(ctx: PluginContext)`
 - `server.py` -- `create_server()` factory + CLI entrypoint (Phase 3)
 
+## Testing Tool Modules
+
+Tool functions are local to their `register(ctx)` call (closures). Tests use a
+`_CapturingMCP` fixture (in `test_tools.py`) that stores registered functions by
+name: `ctx._mcp.tools["tool_name"]`. Call them directly in tests.
+
+`mock_catalog` fixture sets `catalog.get.side_effect` to return different responses
+for `/schema` vs other paths. Entity/query tests that override `get.return_value`
+must first set `mock_catalog.get.side_effect = None` to clear the side_effect.
+
 ## Workplan
 
 `docs/workplan-deriva-mcp-core.md` is the authoritative phase-by-phase plan.

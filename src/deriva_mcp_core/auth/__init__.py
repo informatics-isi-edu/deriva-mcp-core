@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Auth layer for deriva-mcp-core.
 
 Submodules:
@@ -7,4 +9,3 @@ Submodules:
     verifier     -- CredenzaTokenVerifier (mcp TokenVerifier protocol, used by FastMCP)
 """
 
-from __future__ import annotations

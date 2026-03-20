@@ -19,6 +19,7 @@ def test_settings() -> Settings:
     """Settings instance with safe test defaults (no live services required)."""
     return Settings(
         credenza_url="https://credenza.test.example.org",
+        server_url="https://mcp.test.example.org",
         server_resource="urn:deriva:rest:service:mcp",
         deriva_resource="urn:deriva:rest",
         client_id="test-client-id",

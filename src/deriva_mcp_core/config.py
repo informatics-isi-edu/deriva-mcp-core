@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Configuration model for deriva-mcp-core.
 
 All settings are read from environment variables with the DERIVA_MCP_ prefix.
@@ -15,8 +17,6 @@ Optional variables:
                                              (default: 60)
 """
 
-from __future__ import annotations
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,6 +32,7 @@ class Settings(BaseSettings):
 
     # Credenza endpoints and identity
     credenza_url: str = ""
+    server_url: str = ""
     server_resource: str = ""
     deriva_resource: str = ""
 
@@ -41,6 +42,14 @@ class Settings(BaseSettings):
 
     # Token cache tuning
     token_cache_buffer_seconds: int = 60
+    introspect_cache_ttl_seconds: int = 60
+
+    # Audit logging
+    audit_logfile_path: str = "deriva-mcp-audit.log"
+    audit_use_syslog: bool = False
+
+    # Safety
+    disable_mutating_tools: bool = True
 
     def validate_for_http(self) -> None:
         """Raise ValueError if any field required for HTTP transport is empty.
@@ -50,6 +59,7 @@ class Settings(BaseSettings):
         """
         required = {
             "DERIVA_MCP_CREDENZA_URL": self.credenza_url,
+            "DERIVA_MCP_SERVER_URL": self.server_url,
             "DERIVA_MCP_SERVER_RESOURCE": self.server_resource,
             "DERIVA_MCP_DERIVA_RESOURCE": self.deriva_resource,
             "DERIVA_MCP_CLIENT_ID": self.client_id,

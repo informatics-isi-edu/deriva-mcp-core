@@ -1,23 +1,26 @@
+from __future__ import annotations
+
 """Smart derived token cache for deriva-mcp-core.
 
 Caches DERIVA-scoped derived tokens keyed by subject identifier (sub). On cache miss
 or near-expiry, performs a token exchange against Credenza and stores the result.
 
 Per-sub async locking prevents duplicate exchanges under concurrent requests for the
-same user (double-checked locking pattern).
+same user (double-checked locking pattern). Lock creation is safe without its own
+lock because asyncio is single-threaded: the check-and-set on _locks is never
+interrupted by another coroutine.
 
 Usage:
-    cache = DerivedTokenCache()
+    cache = DerivedTokenCache(settings)
 
-    # Inside auth middleware:
+    # Inside auth verifier:
     derived_token = await cache.get(sub=result.sub, subject_token=bearer_token)
 """
-
-from __future__ import annotations
-
 import asyncio
 import time
 from dataclasses import dataclass
+from .exchange import exchange
+from ..config import Settings
 
 
 @dataclass
@@ -29,14 +32,9 @@ class _CacheEntry:
 class DerivedTokenCache:
     """Cache of derived DERIVA-scoped tokens keyed by subject identifier."""
 
-    def __init__(self, buffer_seconds: int = 60) -> None:
-        """
-        Args:
-            buffer_seconds: Treat a token as near-expiry this many seconds before
-                its actual expiry. Triggers a proactive exchange to avoid serving
-                a token that will expire mid-request.
-        """
-        self._buffer_seconds = buffer_seconds
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+        self._buffer_seconds = settings.token_cache_buffer_seconds
         self._cache: dict[str, _CacheEntry] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
@@ -51,10 +49,33 @@ class DerivedTokenCache:
             subject_token: The original bearer token, used if exchange is needed.
 
         Returns:
-            A derived token valid for at least buffer_seconds.
+            A derived token valid for at least buffer_seconds from now.
         """
-        # TODO (Phase 2): implement with per-sub locking and exchange call
-        raise NotImplementedError
+        # Fast path: return cached token without acquiring any lock.
+        entry = self._cache.get(sub)
+        if entry and self._is_valid(entry):
+            return entry.derived_token
+
+        # Slow path: acquire per-sub lock before exchange.
+        # Lock creation is safe here -- asyncio is cooperative and the check-and-set
+        # on _locks is never interrupted between the `if` and the assignment.
+        if sub not in self._locks:
+            self._locks[sub] = asyncio.Lock()
+        lock = self._locks[sub]
+
+        async with lock:
+            # Re-check after acquiring lock: another coroutine may have exchanged
+            # while we were waiting.
+            entry = self._cache.get(sub)
+            if entry and self._is_valid(entry):
+                return entry.derived_token
+
+            result = await exchange(subject_token, self._settings)
+            self._cache[sub] = _CacheEntry(
+                derived_token=result.access_token,
+                expires_at=result.expires_at,
+            )
+            return result.access_token
 
     def invalidate(self, sub: str) -> None:
         """Explicitly evict a cached entry (e.g., after a 401 from downstream)."""

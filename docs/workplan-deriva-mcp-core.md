@@ -91,7 +91,10 @@ artificial indirection.
 
 `PluginContext` exposes:
 
-- `ctx.tool()` -- decorator to register an MCP tool
+- `ctx.tool(mutates=False)` -- decorator to register a read-only MCP tool; `mutates=` is
+  required (omitting it raises `TypeError` at startup); pass `mutates=True` for tools that
+  write to the DERIVA catalog or Hatrac object store; those tools are subject to the
+  `DERIVA_MCP_DISABLE_MUTATING_TOOLS` kill switch
 - `ctx.resource(uri_pattern)` -- decorator to register an MCP resource
 - `ctx.prompt(name)` -- decorator to register an MCP prompt
 - `ctx.on_catalog_connect(callback)` -- register a lifecycle hook called after any tool
@@ -292,14 +295,28 @@ variables and optional `.env` file override.
 
 **Auth (required for HTTP transport):**
 
-| Variable                                | Required | Default | Description                                      |
-|-----------------------------------------|----------|---------|--------------------------------------------------|
-| `DERIVA_MCP_CREDENZA_URL`               | Yes      | --      | Credenza base URL                                |
-| `DERIVA_MCP_SERVER_RESOURCE`            | Yes      | --      | Resource identifier for this MCP server          |
-| `DERIVA_MCP_DERIVA_RESOURCE`            | Yes      | --      | Resource identifier to exchange to (DERIVA REST) |
-| `DERIVA_MCP_CLIENT_ID`                  | Yes      | --      | This server's client ID (confidential client)    |
-| `DERIVA_MCP_CLIENT_SECRET`              | Yes      | --      | This server's client secret                      |
-| `DERIVA_MCP_TOKEN_CACHE_BUFFER_SECONDS` | No       | 60      | Near-expiry buffer for derived token cache       |
+| Variable                                | Required | Default | Description                                                        |
+|-----------------------------------------|----------|---------|--------------------------------------------------------------------|
+| `DERIVA_MCP_CREDENZA_URL`               | Yes      | --      | Credenza base URL                                                  |
+| `DERIVA_MCP_SERVER_URL`                 | Yes      | --      | Public HTTPS URL of this MCP server (e.g. https://mcp.example.org) |
+| `DERIVA_MCP_SERVER_RESOURCE`            | Yes      | --      | Resource identifier for this MCP server (URI or URN)               |
+| `DERIVA_MCP_DERIVA_RESOURCE`            | Yes      | --      | Resource identifier to exchange to (DERIVA REST)                   |
+| `DERIVA_MCP_CLIENT_ID`                  | Yes      | --      | This server's client ID (confidential client)                      |
+| `DERIVA_MCP_CLIENT_SECRET`              | Yes      | --      | This server's client secret                                        |
+| `DERIVA_MCP_TOKEN_CACHE_BUFFER_SECONDS` | No       | 60      | Near-expiry buffer for derived token cache                         |
+
+**Safety:**
+
+| Variable                              | Required | Default | Description                                                                   |
+|---------------------------------------|----------|---------|-------------------------------------------------------------------------------|
+| `DERIVA_MCP_DISABLE_MUTATING_TOOLS`   | No       | `true`  | Kill switch for all tools registered with `mutates=True`. Defaults to enabled -- operators must explicitly set `false` to allow catalog writes. |
+
+**Audit logging:**
+
+| Variable                          | Required | Default                  | Description                                               |
+|-----------------------------------|----------|--------------------------|-----------------------------------------------------------|
+| `DERIVA_MCP_AUDIT_LOGFILE_PATH`   | No       | `deriva-mcp-audit.log`   | Path for rotating JSON audit log file                     |
+| `DERIVA_MCP_AUDIT_USE_SYSLOG`     | No       | `false`                  | Write audit events to syslog (`/dev/log`) instead of file |
 
 **RAG:**
 
@@ -438,7 +455,7 @@ manually set credential. Unit tested.
 
 ---
 
-### Phase 2 -- Auth Layer [TODO]
+### Phase 2 -- Auth Layer [DONE]
 
 **Goal:** Credenza introspection, token exchange, and smart cache implemented and tested.
 No server wiring yet.
@@ -470,7 +487,7 @@ No live Credenza dependency required for tests.
 
 ---
 
-### Phase 3 -- Server Skeleton and Token Verifier [TODO]
+### Phase 3 -- Server Skeleton and Token Verifier [DONE]
 
 **Goal:** A running FastMCP server with auth wiring and plugin framework in place.
 No tools yet, but the full auth pipeline is end-to-end functional and the plugin
@@ -533,7 +550,7 @@ Integration test with mocked Credenza confirms auth pipeline end-to-end.
 
 ---
 
-### Phase 4 -- Core ERMREST Tools and RAG Subsystem [TODO]
+### Phase 4 -- Core ERMREST Tools and RAG Subsystem [PARTIALLY DONE]
 
 **Goal:** Built-in tools covering the ERMREST primitive surface, plus the RAG subsystem
 for documentation and schema search.
@@ -693,9 +710,48 @@ fire-and-forget async task has negligible cost. The async task holds a reference
 indexing completes, then it is GC'd. There is no service-level credential and no
 re-fetch -- the hook has everything it needs from the original request.
 
-Deliverable: All built-in tools and RAG subsystem implemented and unit tested. Server
-runs with full tool surface via `--transport streamable-http`. RAG tools functional with
-both embedded ChromaDB and pgvector backends.
+#### 4.6 Audit Logging (`telemetry/audit/`)
+
+Structured JSON audit log following the Credenza pattern (`python-json-logger`,
+syslog or `TimedRotatingFileHandler` fallback, separate from the application log).
+
+- `audit_event(event, **kwargs)` -- emits a JSON record with `event`, `timestamp`, and
+  auto-injected `principal` (from per-request contextvar; omitted for pre-auth events
+  where no identity is available yet)
+- Auth events in `verifier.py`: `token_inactive`, `token_introspection_failed`,
+  `token_audience_mismatch` (with principal), `token_exchange_failed` (with principal),
+  `token_verified` (with display name)
+- Mutation events in `entity.py` and `hatrac.py`: `entity_insert`, `entity_update`,
+  `entity_delete` (with verbatim filters), `hatrac_create_namespace`, plus `_failed`
+  variants for each with `error_type`
+- `context.get_request_user_id_optional() -> str | None` -- nullable identity accessor
+  used by the audit layer to distinguish "not yet authenticated" from "stdio transport"
+- App-level logging (`_init_logging`) uses Credenza-compatible format and is called from
+  `main()` only (not `create_server()`) to avoid interfering with pytest `caplog`
+
+#### 4.7 Mutation Kill Switch
+
+- `ctx.tool(mutates=)` requires an explicit `True`/`False` declaration on every tool
+  registration; omitting it raises `TypeError` at server startup so undeclared tools
+  are caught before production
+- When `DERIVA_MCP_DISABLE_MUTATING_TOOLS=true` (default), tools registered with
+  `mutates=True` return `{"error": "catalog mutations are disabled by server configuration"}`
+  without executing
+- RAG tools use `mutates=False` -- they write to the local vector store, not the DERIVA
+  catalog, and should not be blocked by the kill switch
+- Server logs a `WARNING` when mutations are disabled and `INFO` when enabled, so
+  operators can confirm the active state at startup
+
+Status notes:
+- ERMREST tools (4.1-4.4), audit logging (4.6), and mutation kill switch (4.7) are
+  implemented and unit tested.
+- RAG subsystem (4.5) is implemented and unit tested but has NOT been validated
+  end-to-end against real GitHub content, a live ChromaDB instance, or a real DERIVA
+  catalog. The chunker, crawler, store, and schema/data indexing pipelines are tested
+  with mocks only. Treat as unproven until Phase 5 integration testing confirms it.
+
+Deliverable: All built-in tools implemented and unit tested. Structured audit log and
+mutation kill switch in place. RAG subsystem pending live validation (see Phase 5).
 
 ---
 
