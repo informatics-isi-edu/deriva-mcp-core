@@ -8,4 +8,3 @@ Submodules:
     token_cache  -- Smart derived token cache (keyed by sub, per-sub async locking)
     verifier     -- CredenzaTokenVerifier (mcp TokenVerifier protocol, used by FastMCP)
 """
-

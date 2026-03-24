@@ -9,7 +9,7 @@ the exchange request.
 
 
 import time
-import httpx3
+import httpx
 from dataclasses import dataclass
 from ..config import Settings
 
@@ -43,8 +43,8 @@ async def exchange(subject_token: str, settings: Settings) -> ExchangeResult:
         ExchangeError: Exchange response is missing required fields.
         httpx.HTTPStatusError: Credenza returned a non-2xx response.
     """
-    url = f"{settings.credenza_url.rstrip('/')}/token"
-    async with httpx.AsyncClient() as client:
+    url = f"{settings.remap_url(settings.credenza_url).rstrip('/')}/token"
+    async with httpx.AsyncClient(verify=settings.ssl_verify) as client:
         response = await client.post(
             url,
             data={

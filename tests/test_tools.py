@@ -10,7 +10,6 @@ import pytest
 
 from deriva_mcp_core.plugin.api import PluginContext, _set_plugin_context
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -59,6 +58,7 @@ class _CapturingMCP:
         def decorator(fn):
             self.tools[fn.__name__] = fn
             return fn
+
         return decorator
 
     def resource(self, *args, **kwargs):
@@ -110,6 +110,7 @@ def mock_catalog():
 class TestCatalogTools:
     def _register(self, ctx):
         from deriva_mcp_core.tools import catalog
+
         catalog.register(ctx)
         return ctx._mcp.tools
 
@@ -152,7 +153,9 @@ class TestCatalogTools:
     async def test_get_table(self, ctx, mock_catalog):
         tools = self._register(ctx)
         with self._patch_server(mock_catalog):
-            result = json.loads(await tools["get_table"]("host.example.org", "1", "public", "MyTable"))
+            result = json.loads(
+                await tools["get_table"]("host.example.org", "1", "public", "MyTable")
+            )
         assert result["schema"] == "public"
         assert result["table"] == "MyTable"
         col_names = [c["name"] for c in result["columns"]]
@@ -194,6 +197,7 @@ class TestCatalogTools:
 class TestEntityTools:
     def _register(self, ctx):
         from deriva_mcp_core.tools import entity
+
         entity.register(ctx)
         return ctx._mcp.tools
 
@@ -248,7 +252,9 @@ class TestEntityTools:
         tools = self._register(ctx)
         with self._patch_server(mock_catalog):
             result = json.loads(
-                await tools["update_entities"]("h", "1", "public", "MyTable", [{"RID": "1-ABC", "Name": "new"}])
+                await tools["update_entities"](
+                    "h", "1", "public", "MyTable", [{"RID": "1-ABC", "Name": "new"}]
+                )
             )
         assert result["status"] == "updated"
 
@@ -265,7 +271,9 @@ class TestEntityTools:
         tools = self._register(ctx)
         with self._patch_server(mock_catalog):
             result = json.loads(
-                await tools["delete_entities"]("h", "1", "public", "MyTable", filters={"RID": "1-ABC"})
+                await tools["delete_entities"](
+                    "h", "1", "public", "MyTable", filters={"RID": "1-ABC"}
+                )
             )
         assert result["status"] == "deleted"
         mock_catalog.delete.assert_called_once()
@@ -291,6 +299,7 @@ class TestEntityTools:
 class TestQueryTools:
     def _register(self, ctx):
         from deriva_mcp_core.tools import query
+
         query.register(ctx)
         return ctx._mcp.tools
 
@@ -307,7 +316,9 @@ class TestQueryTools:
         mock_catalog.get.return_value = mock_resp
         tools = self._register(ctx)
         with self._patch_server(mock_catalog):
-            result = json.loads(await tools["query_attribute"]("h", "1", "isa:Dataset", ["RID", "Name"]))
+            result = json.loads(
+                await tools["query_attribute"]("h", "1", "isa:Dataset", ["RID", "Name"])
+            )
         assert result["count"] == 1
         assert result["rows"] == rows
         called_url = mock_catalog.get.call_args[0][0]
@@ -347,6 +358,7 @@ class TestQueryTools:
 class TestHatracTools:
     def _register(self, ctx):
         from deriva_mcp_core.tools import hatrac
+
         hatrac.register(ctx)
         return ctx._mcp.tools
 
@@ -423,11 +435,13 @@ class TestMutatingToolKillSwitch:
 
     def _register_entity(self, ctx):
         from deriva_mcp_core.tools import entity
+
         entity.register(ctx)
         return ctx._mcp.tools
 
     def _register_hatrac(self, ctx):
         from deriva_mcp_core.tools import hatrac
+
         hatrac.register(ctx)
         return ctx._mcp.tools
 
@@ -458,5 +472,6 @@ class TestMutatingToolKillSwitch:
     def test_tool_without_mutates_raises(self, ctx):
         """ctx.tool() without mutates= must raise TypeError at registration time."""
         with pytest.raises(TypeError, match="mutates="):
+
             @ctx.tool()
             async def undeclared_tool(): ...  # noqa: E704

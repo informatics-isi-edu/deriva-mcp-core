@@ -291,25 +291,28 @@ their instance to `PluginContext` (see plugin authoring guide).
 ### Configuration
 
 `pydantic-settings` `BaseSettings` with `env_prefix="DERIVA_MCP_"`. Supports environment
-variables and optional `.env` file override.
+variables and optional env file. The env file is located by searching these paths in order
+(first found wins): `/etc/deriva-mcp/deriva-mcp.env`, `~/deriva-mcp.env`, `./deriva-mcp.env`.
+Override with `deriva-mcp-core --config /path/to/file.env`. Environment variables always
+take precedence over the env file.
 
 **Auth (required for HTTP transport):**
 
-| Variable                                | Required | Default | Description                                                        |
-|-----------------------------------------|----------|---------|--------------------------------------------------------------------|
-| `DERIVA_MCP_CREDENZA_URL`               | Yes      | --      | Credenza base URL                                                  |
-| `DERIVA_MCP_SERVER_URL`                 | Yes      | --      | Public HTTPS URL of this MCP server (e.g. https://mcp.example.org) |
-| `DERIVA_MCP_SERVER_RESOURCE`            | Yes      | --      | Resource identifier for this MCP server (URI or URN)               |
-| `DERIVA_MCP_DERIVA_RESOURCE`            | Yes      | --      | Resource identifier to exchange to (DERIVA REST)                   |
-| `DERIVA_MCP_CLIENT_ID`                  | Yes      | --      | This server's client ID (confidential client)                      |
-| `DERIVA_MCP_CLIENT_SECRET`              | Yes      | --      | This server's client secret                                        |
-| `DERIVA_MCP_TOKEN_CACHE_BUFFER_SECONDS` | No       | 60      | Near-expiry buffer for derived token cache                         |
+| Variable                                | Required | Default                       | Description                                           |
+|-----------------------------------------|----------|-------------------------------|-------------------------------------------------------|
+| `DERIVA_MCP_CREDENZA_URL`               | Yes      | --                            | Credenza base URL                                     |
+| `DERIVA_MCP_SERVER_URL`                 | Yes      | --                            | Public HTTPS URL of this MCP server                   |
+| `DERIVA_MCP_SERVER_RESOURCE`            | Yes      | --                            | Resource identifier for this MCP server (URI or URN)  |
+| `DERIVA_MCP_CLIENT_SECRET`              | Yes      | --                            | This server's client secret                           |
+| `DERIVA_MCP_DERIVA_RESOURCE`            | No       | `urn:deriva:rest:service:all` | Resource identifier to exchange to (DERIVA REST)      |
+| `DERIVA_MCP_CLIENT_ID`                  | No       | `deriva-mcp`                  | This server's client ID (confidential client)         |
+| `DERIVA_MCP_TOKEN_CACHE_BUFFER_SECONDS` | No       | `60`                          | Near-expiry buffer for derived token cache            |
 
 **Safety:**
 
-| Variable                              | Required | Default | Description                                                                   |
-|---------------------------------------|----------|---------|-------------------------------------------------------------------------------|
-| `DERIVA_MCP_DISABLE_MUTATING_TOOLS`   | No       | `true`  | Kill switch for all tools registered with `mutates=True`. Defaults to enabled -- operators must explicitly set `false` to allow catalog writes. |
+| Variable                            | Required | Default | Description                                                                                                                                     |
+|-------------------------------------|----------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------|
+| `DERIVA_MCP_DISABLE_MUTATING_TOOLS` | No       | `true`  | Kill switch for all tools registered with `mutates=True`. Defaults to enabled -- operators must explicitly set `false` to allow catalog writes. |
 
 **Audit logging:**
 
@@ -327,7 +330,7 @@ variables and optional `.env` file override.
 | `DERIVA_MCP_RAG_CHROMA_DIR`       | No       | `~/.deriva-mcp/rag` | Embedded ChromaDB persistence directory (`chroma` backend) |
 | `DERIVA_MCP_RAG_CHROMA_URL`       | No       | --                  | ChromaDB server URL (overrides dir, enables server mode)   |
 | `DERIVA_MCP_RAG_PG_DSN`           | No       | --                  | PostgreSQL DSN for pgvector backend                        |
-| `DERIVA_MCP_RAG_AUTO_UPDATE`      | No       | `false`             | Re-crawl documentation sources at server startup           |
+| `DERIVA_MCP_RAG_AUTO_UPDATE`      | No       | `true`              | Re-crawl documentation sources at server startup           |
 | `DERIVA_MCP_RAG_DATA_TTL_SECONDS` | No       | `3600`              | Data index staleness TTL; reindex if older than this       |
 
 Resource identifiers may be HTTPS URIs or URNs; Credenza accepts both.
@@ -365,6 +368,11 @@ deriva-mcp-core/
         │   ├── docs.py          # Documentation source ingestion pipeline
         │   ├── schema.py        # Catalog schema indexing (visibility class isolation)
         │   └── data.py          # Generic data indexing primitives + RowSerializer protocol
+        ├── telemetry/           # Observability
+        │   ├── __init__.py      # Re-exports audit_event, init_audit_logger
+        │   └── audit/
+        │       ├── __init__.py
+        │       └── logger.py    # Structured JSON audit log (python-json-logger); syslog or rotating file
         └── tools/               # Built-in DERIVA tools (each has register(ctx))
             ├── __init__.py
             ├── catalog.py       # Schema introspection
@@ -755,7 +763,7 @@ mutation kill switch in place. RAG subsystem pending live validation (see Phase 
 
 ---
 
-### Phase 5 -- Integration and Validation [TODO]
+### Phase 5 -- Integration and Validation [IN PROGRESS]
 
 **Goal:** End-to-end validation against live Credenza + DERIVA, and RAG subsystem
 validated against real documentation content and a real catalog.
@@ -767,13 +775,24 @@ validated against real documentation content and a real catalog.
 - Test token cache hit/miss/near-expiry behavior under concurrent requests
 - Test schema introspection tools against a real DERIVA catalog
 
-#### 5.2 RAG Integration Tests
+#### 5.2 RAG Integration Tests [DONE]
 
-- Test docs ingestion against real GitHub repositories (at least `ermrest-docs`)
-- Test schema indexing against a real DERIVA catalog; verify visibility class deduplication
-- Test `rag_search` returns relevant results for a known query
-- Test `on_catalog_connect` lifecycle hook triggers schema indexing automatically
-- Test pgvector backend (requires PostgreSQL + pgvector extension in test environment)
+Automated tests (in `tests/test_rag_integration.py`, marker `rag`):
+
+- `ChromaVectorStore` CRUD and semantic search with embedded ChromaDB
+- Schema indexing and visibility class deduplication against real ChromaDB
+- `on_catalog_connect` lifecycle hook wires up and indexes schema correctly
+- `PgVectorStore` CRUD, search, and schema indexing via `testing.postgresql`
+  (skipped on Windows; requires `pgvector` extension installed on the host)
+
+These run without live external services. Run with:
+`uv run pytest -m rag`
+
+Human-in-the-loop validation completed 2026-03-23 (Claude Desktop + Claude Code):
+- Docs ingestion against real GitHub repositories (ermrest-docs, deriva-py)
+- Full end-to-end `rag_search` against a real DERIVA catalog with live data
+- Entity CRUD tools validated against a live local catalog (query and mutation)
+- pgvector backend validation on Linux with pgvector installed: still TODO
 
 #### 5.3 Plugin Smoke Test
 

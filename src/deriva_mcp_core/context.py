@@ -15,6 +15,7 @@ Public API:
 
 import contextvars
 from collections.abc import Callable
+
 from deriva.core import DerivaServer, HatracStore
 
 # Per-request credential dict. Format matches what DerivaBinding accepts:
@@ -101,6 +102,11 @@ def _contextvar_credential(_hostname: str) -> dict:
 
 _get_credential_fn: Callable[[str], dict] = _contextvar_credential
 
+# Hostname remap table. Maps external hostnames to internal network aliases so
+# that tool calls using a public hostname (e.g. "localhost") are routed to the
+# correct endpoint from inside the container (e.g. "deriva").
+_hostname_map: dict[str, str] = {}
+
 
 def _set_stdio_credential_fn(fn: Callable[[str], dict]) -> None:
     """Replace the credential resolver with a per-hostname disk-based lookup.
@@ -109,6 +115,21 @@ def _set_stdio_credential_fn(fn: Callable[[str], dict]) -> None:
     """
     global _get_credential_fn
     _get_credential_fn = fn
+
+
+def init_hostname_map(mapping: dict[str, str]) -> None:
+    """Set the hostname remap table for outbound DERIVA connections.
+
+    Called once at server startup from create_server(). Replaces the module-level
+    map so that get_deriva_server() and get_hatrac_store() route tool hostnames
+    through the internal network alias when running inside a Docker container.
+    """
+    global _hostname_map
+    _hostname_map = dict(mapping)
+
+
+def _remap(hostname: str) -> str:
+    return _hostname_map.get(hostname, hostname)
 
 
 def get_deriva_server(hostname: str):
@@ -130,6 +151,7 @@ def get_deriva_server(hostname: str):
         RuntimeError: If called outside a tool or resource handler context
                       and stdio credential fn is not set.
     """
+    hostname = _remap(hostname)
     return DerivaServer("https", hostname, credentials=_get_credential_fn(hostname))
 
 
@@ -149,4 +171,5 @@ def get_hatrac_store(hostname: str):
         RuntimeError: If called outside a tool or resource handler context
                       and stdio credential fn is not set.
     """
+    hostname = _remap(hostname)
     return HatracStore("https", hostname, credentials=_get_credential_fn(hostname))

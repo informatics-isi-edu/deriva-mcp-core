@@ -47,8 +47,8 @@ async def introspect(token: str, settings: Settings) -> IntrospectionResult:
         IntrospectionError: Introspection response is missing required fields.
         httpx.HTTPStatusError: Credenza returned a non-2xx response.
     """
-    url = f"{settings.credenza_url.rstrip('/')}/introspect"
-    async with httpx.AsyncClient() as client:
+    url = f"{settings.remap_url(settings.credenza_url).rstrip('/')}/introspect"
+    async with httpx.AsyncClient(verify=settings.ssl_verify) as client:
         response = await client.post(
             url,
             data={"token": token, "resource": settings.server_resource},

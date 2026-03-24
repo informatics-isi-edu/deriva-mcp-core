@@ -31,19 +31,29 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def register(ctx: "PluginContext") -> None:
+def register(ctx: PluginContext, env_file: str | None = None) -> None:
     """Register the RAG subsystem as a built-in plugin.
 
     When DERIVA_MCP_RAG_ENABLED is false (the default), this function returns
     immediately without registering any tools or hooks. This makes the RAG
     subsystem entirely opt-in -- deployments that do not need semantic search
     incur no overhead.
+
+    Args:
+        ctx: Plugin context to register tools and hooks against.
+        env_file: Path to the env file resolved at server startup. Forwarded
+            to RAGSettings so RAG variables in deriva-mcp.env are picked up.
     """
     from .config import RAGSettings
 
-    settings = RAGSettings()
+    settings = RAGSettings(_env_file=env_file)
+    logger.info(
+        "RAG subsystem: enabled=%s, vector_backend=%s, env_file=%s",
+        settings.enabled,
+        settings.vector_backend,
+        env_file,
+    )
     if not settings.enabled:
-        logger.debug("RAG subsystem disabled (DERIVA_MCP_RAG_ENABLED not set)")
         return
 
     import urllib.parse
@@ -76,16 +86,28 @@ def register(ctx: "PluginContext") -> None:
         import asyncio
 
         async def _startup_update() -> None:
+            logger.info(
+                "RAG startup crawl: updating %d source(s): %s",
+                len(all_sources),
+                ", ".join(s.name for s in all_sources),
+            )
+            failed = 0
             for src in all_sources:
                 try:
                     await docs_manager.update(src)
                 except Exception:
+                    failed += 1
                     logger.warning("Startup doc update failed for %r", src.name, exc_info=True)
+            logger.info(
+                "RAG startup crawl complete: %d source(s) processed, %d failed",
+                len(all_sources),
+                failed,
+            )
 
         try:
-            asyncio.get_event_loop().create_task(_startup_update())
+            asyncio.get_running_loop().create_task(_startup_update())
         except RuntimeError:
-            pass  # no running loop at import time (e.g., during tests)
+            pass  # no running loop -- startup crawl skipped (e.g., during tests)
 
     # ------------------------------------------------------------------
     # on_catalog_connect hook -- auto-index schema on first access
@@ -136,14 +158,15 @@ def register(ctx: "PluginContext") -> None:
             where: dict = {}
             if doc_type:
                 where["doc_type"] = doc_type
-            if hostname and catalog_id:
-                # Filter schema results to this catalog's visibility class
-                # by using the catalog prefix as a source filter
-                schema_prefix = schema_source_name(hostname, catalog_id, "")
-                where["source_prefix"] = schema_prefix  # informational only
-                # Actual filtering: search without source filter, let the
-                # semantic similarity handle relevance
             results = await store.search(query, limit=limit, where=where if where else None)
+            if hostname and catalog_id:
+                # Exclude schema chunks that belong to a different catalog.
+                # Non-schema sources (user-guide, data) are always included.
+                schema_prefix = schema_source_name(hostname, catalog_id, "")
+                results = [
+                    r for r in results
+                    if not r.source.startswith("schema:") or r.source.startswith(schema_prefix)
+                ]
             return json.dumps(
                 [
                     {
@@ -172,9 +195,7 @@ def register(ctx: "PluginContext") -> None:
         """
         try:
             targets = (
-                [s for s in all_sources if s.name == source_name]
-                if source_name
-                else all_sources
+                [s for s in all_sources if s.name == source_name] if source_name else all_sources
             )
             if source_name and not targets:
                 return json.dumps({"error": f"Unknown source: {source_name!r}"})
@@ -245,14 +266,16 @@ def register(ctx: "PluginContext") -> None:
             rows = catalog.get(url).json()
             user_id = get_request_user_id()
             await index_table_data(store, hostname, catalog_id, table, rows, user_id)
-            return json.dumps({
-                "status": "indexed",
-                "hostname": hostname,
-                "catalog_id": catalog_id,
-                "schema": schema,
-                "table": table,
-                "row_count": len(rows),
-            })
+            return json.dumps(
+                {
+                    "status": "indexed",
+                    "hostname": hostname,
+                    "catalog_id": catalog_id,
+                    "schema": schema,
+                    "table": table,
+                    "row_count": len(rows),
+                }
+            )
         except Exception as exc:
             logger.error("rag_index_table failed: %s", exc)
             return json.dumps({"error": str(exc)})
@@ -282,3 +305,6 @@ def register(ctx: "PluginContext") -> None:
         except Exception as exc:
             logger.error("rag_status failed: %s", exc)
             return json.dumps({"error": str(exc)})
+
+    rag_tools = [rag_search, rag_update_docs, rag_index_schema, rag_index_table, rag_status]
+    logger.info("RAG tools registered: %s", [fn.__name__ for fn in rag_tools])

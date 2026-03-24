@@ -27,9 +27,7 @@ _SYSTEM_SCHEMAS: frozenset[str] = frozenset({"_ermrest", "_acl_admin"})
 
 
 def _compute_schema_hash(schema_json: dict) -> str:
-    return hashlib.sha256(
-        json.dumps(schema_json, sort_keys=True).encode()
-    ).hexdigest()
+    return hashlib.sha256(json.dumps(schema_json, sort_keys=True).encode()).hexdigest()
 
 
 def _col_summary(col: dict) -> dict[str, Any]:
@@ -47,10 +45,7 @@ def _col_summary(col: dict) -> dict[str, Any]:
 def _fk_summary(fk: dict) -> dict[str, Any]:
     fk_cols = [c["column_name"] for c in fk.get("foreign_key_columns", [])]
     ref_cols = fk.get("referenced_columns", [])
-    ref_table = (
-        f"{ref_cols[0]['schema_name']}:{ref_cols[0]['table_name']}"
-        if ref_cols else None
-    )
+    ref_table = f"{ref_cols[0]['schema_name']}:{ref_cols[0]['table_name']}" if ref_cols else None
     return {
         "columns": fk_cols,
         "references": ref_table,
@@ -93,11 +88,13 @@ def register(ctx: PluginContext) -> None:
                 for name, s in schema_json.get("schemas", {}).items()
                 if name not in _SYSTEM_SCHEMAS
             ]
-            return json.dumps({
-                "hostname": hostname,
-                "catalog_id": catalog_id,
-                "schemas": schemas,
-            })
+            return json.dumps(
+                {
+                    "hostname": hostname,
+                    "catalog_id": catalog_id,
+                    "schemas": schemas,
+                }
+            )
         except Exception as exc:
             logger.error("get_catalog_info failed: %s", exc)
             return json.dumps({"error": str(exc)})
@@ -112,10 +109,7 @@ def register(ctx: PluginContext) -> None:
         """
         try:
             schema_json = _fetch_schema(hostname, catalog_id)
-            names = [
-                n for n in schema_json.get("schemas", {})
-                if n not in _SYSTEM_SCHEMAS
-            ]
+            names = [n for n in schema_json.get("schemas", {}) if n not in _SYSTEM_SCHEMAS]
             return json.dumps({"schemas": names})
         except Exception as exc:
             logger.error("list_schemas failed: %s", exc)
@@ -147,11 +141,13 @@ def register(ctx: PluginContext) -> None:
                 }
                 for tname, tdef in schema_doc.get("tables", {}).items()
             ]
-            return json.dumps({
-                "schema": schema,
-                "comment": schema_doc.get("comment"),
-                "tables": tables,
-            })
+            return json.dumps(
+                {
+                    "schema": schema,
+                    "comment": schema_doc.get("comment"),
+                    "tables": tables,
+                }
+            )
         except Exception as exc:
             logger.error("get_schema failed: %s", exc)
             return json.dumps({"error": str(exc)})
@@ -180,19 +176,18 @@ def register(ctx: PluginContext) -> None:
             if tdef is None:
                 return json.dumps({"error": f"Table not found: {schema!r}:{table!r}"})
 
-            keys = [
-                {"columns": k.get("unique_columns", [])}
-                for k in tdef.get("keys", [])
-            ]
-            return json.dumps({
-                "schema": schema,
-                "table": table,
-                "comment": tdef.get("comment"),
-                "kind": tdef.get("kind", "table"),
-                "columns": [_col_summary(c) for c in tdef.get("column_definitions", [])],
-                "keys": keys,
-                "foreign_keys": [_fk_summary(fk) for fk in tdef.get("foreign_keys", [])],
-            })
+            keys = [{"columns": k.get("unique_columns", [])} for k in tdef.get("keys", [])]
+            return json.dumps(
+                {
+                    "schema": schema,
+                    "table": table,
+                    "comment": tdef.get("comment"),
+                    "kind": tdef.get("kind", "table"),
+                    "columns": [_col_summary(c) for c in tdef.get("column_definitions", [])],
+                    "keys": keys,
+                    "foreign_keys": [_fk_summary(fk) for fk in tdef.get("foreign_keys", [])],
+                }
+            )
         except Exception as exc:
             logger.error("get_table failed: %s", exc)
             return json.dumps({"error": str(exc)})

@@ -68,12 +68,14 @@ def register(ctx: PluginContext) -> None:
             limit = min(limit, 1000)
             url = _entity_url(schema, table, filters) + f"?limit={limit}"
             entities = catalog.get(url).json()
-            return json.dumps({
-                "schema": schema,
-                "table": table,
-                "count": len(entities),
-                "entities": entities,
-            })
+            return json.dumps(
+                {
+                    "schema": schema,
+                    "table": table,
+                    "count": len(entities),
+                    "entities": entities,
+                }
+            )
         except Exception as exc:
             logger.error("get_entities failed: %s", exc)
             return json.dumps({"error": str(exc)})
@@ -111,13 +113,15 @@ def register(ctx: PluginContext) -> None:
                 input_row_count=len(entities),
                 inserted_count=len(inserted),
             )
-            return json.dumps({
-                "status": "inserted",
-                "schema": schema,
-                "table": table,
-                "inserted_count": len(inserted),
-                "rids": [r.get("RID") for r in inserted],
-            })
+            return json.dumps(
+                {
+                    "status": "inserted",
+                    "schema": schema,
+                    "table": table,
+                    "inserted_count": len(inserted),
+                    "rids": [r.get("RID") for r in inserted],
+                }
+            )
         except Exception as exc:
             logger.error("insert_entities failed: %s", exc)
             audit_event(
@@ -166,13 +170,15 @@ def register(ctx: PluginContext) -> None:
                 input_row_count=len(entities),
                 updated_count=len(updated),
             )
-            return json.dumps({
-                "status": "updated",
-                "schema": schema,
-                "table": table,
-                "updated_count": len(updated),
-                "rids": [r.get("RID") for r in updated],
-            })
+            return json.dumps(
+                {
+                    "status": "updated",
+                    "schema": schema,
+                    "table": table,
+                    "updated_count": len(updated),
+                    "rids": [r.get("RID") for r in updated],
+                }
+            )
         except Exception as exc:
             logger.error("update_entities failed: %s", exc)
             audit_event(
@@ -208,9 +214,9 @@ def register(ctx: PluginContext) -> None:
         """
         try:
             if not filters:
-                return json.dumps({
-                    "error": "filters must be non-empty to prevent full-table deletion"
-                })
+                return json.dumps(
+                    {"error": "filters must be non-empty to prevent full-table deletion"}
+                )
             catalog = get_deriva_server(hostname).connect_ermrest(catalog_id)
             url = _entity_url(schema, table, filters)
             catalog.delete(url)
@@ -222,12 +228,14 @@ def register(ctx: PluginContext) -> None:
                 table=table,
                 filters=filters,
             )
-            return json.dumps({
-                "status": "deleted",
-                "schema": schema,
-                "table": table,
-                "filters": filters,
-            })
+            return json.dumps(
+                {
+                    "status": "deleted",
+                    "schema": schema,
+                    "table": table,
+                    "filters": filters,
+                }
+            )
         except Exception as exc:
             logger.error("delete_entities failed: %s", exc)
             audit_event(

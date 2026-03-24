@@ -19,7 +19,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -68,7 +68,7 @@ class SourceStats:
 
 
 def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat()
+    return datetime.now(tz=UTC).isoformat()
 
 
 def _chunk_id(chunk: Chunk) -> str:
@@ -146,7 +146,7 @@ class ChromaVectorStore(VectorStore):
 
     _COLLECTION = "deriva_rag"
 
-    def __init__(self, settings: "RAGSettings") -> None:
+    def __init__(self, settings: RAGSettings) -> None:
         self._settings = settings
         self._client: Any = None
         self._collection: Any = None
@@ -284,17 +284,17 @@ class ChromaVectorStore(VectorStore):
 
 
 _CREATE_EXTENSION = "CREATE EXTENSION IF NOT EXISTS vector;"
-_CREATE_TABLE = """
+_CREATE_TABLE = f"""
 CREATE TABLE IF NOT EXISTS deriva_rag_chunks (
     id          TEXT PRIMARY KEY,
     source      TEXT NOT NULL,
     doc_type    TEXT NOT NULL,
     text        TEXT NOT NULL,
     metadata    JSONB NOT NULL DEFAULT '{{}}',
-    embedding   vector({dim}) NOT NULL,
+    embedding   vector({_EMBEDDING_DIM}) NOT NULL,
     indexed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-""".format(dim=_EMBEDDING_DIM)
+"""
 _CREATE_INDEXES = """
 CREATE INDEX IF NOT EXISTS deriva_rag_source_idx
     ON deriva_rag_chunks(source);
@@ -306,7 +306,7 @@ CREATE INDEX IF NOT EXISTS deriva_rag_embedding_idx
 class PgVectorStore(VectorStore):
     """VectorStore backed by PostgreSQL with the pgvector extension."""
 
-    def __init__(self, settings: "RAGSettings") -> None:
+    def __init__(self, settings: RAGSettings) -> None:
         self._settings = settings
         self._pool: Any = None
         self._ef: Any = None  # embedding function, lazy-loaded
@@ -344,9 +344,7 @@ class PgVectorStore(VectorStore):
             embeddings = await asyncio.to_thread(ef, texts)
 
             async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM deriva_rag_chunks WHERE source = $1", source
-                )
+                await conn.execute("DELETE FROM deriva_rag_chunks WHERE source = $1", source)
                 await conn.executemany(
                     """
                     INSERT INTO deriva_rag_chunks
@@ -390,7 +388,7 @@ class PgVectorStore(VectorStore):
             SELECT text, source, doc_type, metadata,
                    1 - (embedding <=> $1::vector) AS score
             FROM deriva_rag_chunks
-            WHERE {' AND '.join(clauses)}
+            WHERE {" AND ".join(clauses)}
             ORDER BY embedding <=> $1::vector
             LIMIT ${len(params)}
         """
@@ -410,9 +408,7 @@ class PgVectorStore(VectorStore):
     async def delete_source(self, source: str) -> None:
         pool = await self._ensure_pool()
         async with pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM deriva_rag_chunks WHERE source = $1", source
-            )
+            await conn.execute("DELETE FROM deriva_rag_chunks WHERE source = $1", source)
 
     async def has_source(self, source: str) -> bool:
         pool = await self._ensure_pool()
@@ -448,7 +444,7 @@ class PgVectorStore(VectorStore):
 # ---------------------------------------------------------------------------
 
 
-def get_store(settings: "RAGSettings") -> VectorStore:
+def get_store(settings: RAGSettings) -> VectorStore:
     """Construct the configured VectorStore implementation."""
     if settings.vector_backend == "pgvector":
         return PgVectorStore(settings)

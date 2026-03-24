@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+import asyncio
 import logging
 import os
 
@@ -27,9 +28,9 @@ from starlette.responses import JSONResponse, Response
 from .auth.introspect_cache import IntrospectionCache
 from .auth.token_cache import DerivedTokenCache
 from .auth.verifier import CredenzaTokenVerifier
-from .config import Settings
+from .config import Settings, find_config_file
 from .config import settings as _default_settings
-from .context import _set_stdio_credential_fn
+from .context import _set_stdio_credential_fn, init_hostname_map
 from .plugin.api import PluginContext, _set_plugin_context
 from .plugin.loader import load_plugins
 from .rag import register as _register_rag
@@ -42,8 +43,9 @@ logger = logging.getLogger(__name__)
 def _init_logging(debug: bool = False) -> None:
     """Configure the root deriva_mcp_core logger.
 
-    Uses the same format as Credenza: timestamp, process/thread, level, logger name.
-    Attempts syslog first; falls back to a stream handler.
+    Always adds a stderr stream handler so logs appear in docker logs.
+    Also adds a syslog handler when /dev/log is available, for production
+    deployments that forward syslog to a central collector.
     """
     from logging.handlers import SysLogHandler
 
@@ -54,8 +56,11 @@ def _init_logging(debug: bool = False) -> None:
         "[%(process)d:%(threadName)s] [%(levelname)s] [%(name)s] - %(message)s"
     )
 
-    log_handler: logging.Handler = logging.StreamHandler()
-    log_handler.setFormatter(fmt_stream)
+    root = logging.getLogger("deriva_mcp_core")
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(fmt_stream)
+    root.addHandler(stream_handler)
 
     syslog_socket = "/dev/log"
     if os.path.exists(syslog_socket) and os.access(syslog_socket, os.W_OK):
@@ -63,14 +68,26 @@ def _init_logging(debug: bool = False) -> None:
             sh = SysLogHandler(address=syslog_socket, facility=SysLogHandler.LOG_LOCAL1)
             sh.ident = "deriva-mcp-core: "
             sh.setFormatter(fmt_syslog)
-            log_handler = sh
+            root.addHandler(sh)
         except Exception:
-            pass  # keep the stream handler
+            pass
 
-    root = logging.getLogger("deriva_mcp_core")
-    root.addHandler(log_handler)
     root.setLevel(logging.DEBUG if debug else logging.INFO)
     root.propagate = False
+
+    # Suppress per-request INFO noise from httpx/httpcore (individual fetches).
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+    # Route the mcp and uvicorn loggers through our plain stream handler so
+    # their records don't propagate to the root logger where chromadb's rich
+    # dependency may have installed a RichHandler (which produces multiline
+    # wrapped output).
+    for lib_name in ("mcp", "uvicorn"):
+        lib_log = logging.getLogger(lib_name)
+        lib_log.handlers = []
+        lib_log.addHandler(stream_handler)
+        lib_log.propagate = False
 
 
 def create_server(
@@ -78,6 +95,7 @@ def create_server(
     settings: Settings | None = None,
     host: str = "127.0.0.1",
     port: int = 8000,
+    env_file: str | None = None,
 ):
     """Create and configure the FastMCP server.
 
@@ -86,11 +104,17 @@ def create_server(
         settings: Configuration instance. Defaults to the module-level singleton.
         host: Bind address for http transport.
         port: Bind port for http transport.
+        env_file: Path to the env file resolved at startup. Forwarded to RAG
+            settings so RAG variables in deriva-mcp.env are picked up.
 
     Returns:
         A configured FastMCP instance ready to run.
     """
     cfg = settings or _default_settings
+
+    if cfg.hostname_map:
+        logger.info("Hostname map active: %s", cfg.hostname_map)
+        init_hostname_map(cfg.hostname_map)
 
     init_audit_logger(filename=cfg.audit_logfile_path, use_syslog=cfg.audit_use_syslog)
 
@@ -101,9 +125,7 @@ def create_server(
             "Set DERIVA_MCP_DISABLE_MUTATING_TOOLS=false to enable catalog writes."
         )
     else:
-        logger.info(
-            "Mutating tools are ENABLED (DERIVA_MCP_DISABLE_MUTATING_TOOLS=false)."
-        )
+        logger.info("Mutating tools are ENABLED (DERIVA_MCP_DISABLE_MUTATING_TOOLS=false).")
 
     if transport == "http":
         cfg.validate_for_http()
@@ -114,12 +136,14 @@ def create_server(
             issuer_url=cfg.credenza_url,
             resource_server_url=cfg.server_url,
         )
-        mcp = FastMCP("deriva-mcp-core",
-                      token_verifier=verifier,
-                      auth=auth,
-                      host=host,
-                      port=port,
-                      streamable_http_path="/")
+        mcp = FastMCP(
+            "deriva-mcp-core",
+            token_verifier=verifier,
+            auth=auth,
+            host=host,
+            port=port,
+            streamable_http_path="/",
+        )
     else:
         # stdio: read per-hostname credentials from local disk at call time
         _set_stdio_credential_fn(_get_credential)
@@ -137,7 +161,7 @@ def create_server(
     for module in [catalog, entity, query, hatrac]:
         module.register(ctx)
 
-    _register_rag(ctx)
+    _register_rag(ctx, env_file=env_file)
 
     # Discover and register external plugins (entry points)
     load_plugins(ctx)
@@ -168,9 +192,40 @@ def main() -> None:
         default=8000,
         help="Bind port for http transport (default: 8000)",
     )
+    parser.add_argument(
+        "--config",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Path to env file (default: search /etc/deriva-mcp/deriva-mcp.env,"
+            " ~/deriva-mcp.env, ./deriva-mcp.env)"
+        ),
+    )
     args = parser.parse_args()
 
-    mcp = create_server(transport=args.transport, host=args.host, port=args.port)
+    try:
+        config_path = find_config_file(explicit=args.config)
+    except FileNotFoundError as exc:
+        parser.error(str(exc))
+
+    cfg = Settings(_env_file=config_path)
     _init_logging()
-    fastmcp_transport = "streamable-http" if args.transport == "http" else args.transport
-    mcp.run(transport=fastmcp_transport)
+    if config_path:
+        logger.info("Loaded configuration from: %s", config_path)
+    else:
+        logger.info("No config file found; using environment variables and defaults")
+
+    async def _run() -> None:
+        mcp = create_server(
+            transport=args.transport,
+            settings=cfg,
+            host=args.host,
+            port=args.port,
+            env_file=config_path,
+        )
+        if args.transport == "http":
+            await mcp.run_streamable_http_async()
+        else:
+            await mcp.run_stdio_async()
+
+    asyncio.run(_run())

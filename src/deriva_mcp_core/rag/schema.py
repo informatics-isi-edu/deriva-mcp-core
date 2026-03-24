@@ -113,16 +113,14 @@ def schema_to_markdown(hostname: str, catalog_id: str, schema_json: dict) -> str
                     if ref_cols:
                         ref_schema = ref_cols[0].get("schema_name", "")
                         ref_table = ref_cols[0].get("table_name", "")
-                        lines.append(
-                            f"- {', '.join(fk_cols)} -> {ref_schema}:{ref_table}"
-                        )
+                        lines.append(f"- {', '.join(fk_cols)} -> {ref_schema}:{ref_table}")
                 lines.append("")
 
     return "\n".join(lines)
 
 
 async def index_schema(
-    store: "VectorStore",
+    store: VectorStore,
     hostname: str,
     catalog_id: str,
     schema_json: dict,
@@ -147,7 +145,7 @@ async def index_schema(
 
 
 async def has_schema(
-    store: "VectorStore",
+    store: VectorStore,
     hostname: str,
     catalog_id: str,
     schema_hash: str,

@@ -26,7 +26,7 @@ class RAGSettings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="DERIVA_MCP_RAG_",
-        env_file=".env",
+        env_file_encoding="utf-8",
         extra="ignore",
     )
 
@@ -45,10 +45,9 @@ class RAGSettings(BaseSettings):
     data_dir: str = "~/.deriva-mcp/rag"  # SHA cache and runtime sources
 
     @model_validator(mode="after")
-    def _check_backend_config(self) -> "RAGSettings":
+    def _check_backend_config(self) -> RAGSettings:
         if self.enabled and self.vector_backend == "pgvector" and not self.pg_dsn:
             raise ValueError(
-                "DERIVA_MCP_RAG_PG_DSN is required when"
-                " DERIVA_MCP_RAG_VECTOR_BACKEND=pgvector"
+                "DERIVA_MCP_RAG_PG_DSN is required when DERIVA_MCP_RAG_VECTOR_BACKEND=pgvector"
             )
         return self

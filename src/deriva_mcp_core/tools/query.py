@@ -55,12 +55,14 @@ def register(ctx: PluginContext) -> None:
             if attributes:
                 url += "/" + ",".join(attributes)
             rows = catalog.get(url).json()
-            return json.dumps({
-                "path": path,
-                "attributes": attributes,
-                "count": len(rows),
-                "rows": rows,
-            })
+            return json.dumps(
+                {
+                    "path": path,
+                    "attributes": attributes,
+                    "count": len(rows),
+                    "rows": rows,
+                }
+            )
         except Exception as exc:
             logger.error("query_attribute failed: %s", exc)
             return json.dumps({"error": str(exc)})
@@ -94,11 +96,13 @@ def register(ctx: PluginContext) -> None:
             catalog = get_deriva_server(hostname).connect_ermrest(catalog_id)
             url = f"/aggregate/{path}/{','.join(aggregates)}"
             result = catalog.get(url).json()
-            return json.dumps({
-                "path": path,
-                "aggregates": aggregates,
-                "result": result,
-            })
+            return json.dumps(
+                {
+                    "path": path,
+                    "aggregates": aggregates,
+                    "result": result,
+                }
+            )
         except Exception as exc:
             logger.error("query_aggregate failed: %s", exc)
             return json.dumps({"error": str(exc)})

@@ -78,7 +78,7 @@ def _generic_row_markdown(table_name: str, row: dict) -> str:
 
 
 async def index_table_data(
-    store: "VectorStore",
+    store: VectorStore,
     hostname: str,
     catalog_id: str,
     table_name: str,

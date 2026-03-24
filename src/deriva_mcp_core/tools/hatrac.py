@@ -40,10 +40,12 @@ def register(ctx: PluginContext) -> None:
             # Hatrac namespace listing requires trailing slash
             ns_path = path.rstrip("/") + "/"
             contents = store.get(ns_path).json()
-            return json.dumps({
-                "path": ns_path,
-                "contents": contents,
-            })
+            return json.dumps(
+                {
+                    "path": ns_path,
+                    "contents": contents,
+                }
+            )
         except Exception as exc:
             logger.error("list_namespace failed: %s", exc)
             return json.dumps({"error": str(exc)})
@@ -63,10 +65,12 @@ def register(ctx: PluginContext) -> None:
             store = get_hatrac_store(hostname)
             resp = store.head(path)
             metadata = {k.lower(): v for k, v in resp.headers.items()}
-            return json.dumps({
-                "path": path,
-                "metadata": metadata,
-            })
+            return json.dumps(
+                {
+                    "path": path,
+                    "metadata": metadata,
+                }
+            )
         except Exception as exc:
             logger.error("get_object_metadata failed: %s", exc)
             return json.dumps({"error": str(exc)})
@@ -87,10 +91,12 @@ def register(ctx: PluginContext) -> None:
             ns_path = path.rstrip("/") + "/"
             store.put(ns_path, data=b"", headers={"Content-Type": "application/x-hatrac-namespace"})
             audit_event("hatrac_create_namespace", hostname=hostname, path=ns_path)
-            return json.dumps({
-                "status": "created",
-                "path": ns_path,
-            })
+            return json.dumps(
+                {
+                    "status": "created",
+                    "path": ns_path,
+                }
+            )
         except Exception as exc:
             logger.error("create_namespace failed: %s", exc)
             audit_event(

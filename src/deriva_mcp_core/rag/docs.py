@@ -38,11 +38,11 @@ logger = logging.getLogger(__name__)
 class DocSource:
     """Configuration for a GitHub-hosted Markdown documentation source."""
 
-    name: str        # unique identifier (e.g., "deriva-py-docs")
-    owner: str       # GitHub org or user (e.g., "informatics-isi-edu")
-    repo: str        # repository name
-    branch: str      # branch name (e.g., "master")
-    path_prefix: str # path prefix filter (e.g., "docs/")
+    name: str  # unique identifier (e.g., "deriva-py-docs")
+    owner: str  # GitHub org or user (e.g., "informatics-isi-edu")
+    repo: str  # repository name
+    branch: str  # branch name (e.g., "master")
+    path_prefix: str  # path prefix filter (e.g., "docs/")
     doc_type: str = "user-guide"  # stored as metadata in the vector store
 
 
@@ -78,7 +78,7 @@ BUILTIN_SOURCES: list[DocSource] = [
 class RAGDocsManager:
     """Manages documentation source ingestion into the vector store."""
 
-    def __init__(self, store: "VectorStore", settings: "RAGSettings") -> None:
+    def __init__(self, store: VectorStore, settings: RAGSettings) -> None:
         self._store = store
         self._data_dir = Path(os.path.expanduser(settings.data_dir))
         self._data_dir.mkdir(parents=True, exist_ok=True)
@@ -101,6 +101,7 @@ class RAGDocsManager:
         Returns:
             Number of files ingested (fetched and upserted).
         """
+        logger.info("ingest %r: crawling %s/%s@%s/%s", source.name, source.owner, source.repo, source.branch, source.path_prefix)
         crawler = GitHubCrawler(
             owner=source.owner,
             repo=source.repo,
@@ -131,9 +132,7 @@ class RAGDocsManager:
             ingested += 1
 
         self._save_sha_cache(source.name, new_cache)
-        logger.info(
-            "ingest %r: %d/%d files processed", source.name, ingested, len(entries)
-        )
+        logger.info("ingest %r: %d/%d files processed", source.name, ingested, len(entries))
         return ingested
 
     async def update(self, source: DocSource) -> int:

@@ -2,42 +2,104 @@ from __future__ import annotations
 
 """Configuration model for deriva-mcp-core.
 
-All settings are read from environment variables with the DERIVA_MCP_ prefix.
-An optional .env file is also supported (lowest priority, overridden by env vars).
+Settings are loaded from environment variables (DERIVA_MCP_ prefix) and an
+optional env file. The env file is located by find_config_file(), which
+searches the following paths in order and uses the first one found:
 
-Required variables (server will not start without these in HTTP mode):
+    /etc/deriva-mcp/deriva-mcp.env   (system-wide deployment)
+    ~/deriva-mcp.env                 (user home directory)
+    ./deriva-mcp.env                 (current working directory)
+
+An explicit path can be supplied via the --config CLI argument or by calling
+find_config_file(explicit="/path/to/file") directly. Environment variables
+always take precedence over the env file.
+
+Required variables (HTTP transport only -- not needed for stdio):
     DERIVA_MCP_CREDENZA_URL         -- Base URL of the Credenza instance
+    DERIVA_MCP_SERVER_URL           -- Public HTTPS URL of this MCP server
     DERIVA_MCP_SERVER_RESOURCE      -- Resource identifier for this MCP server
-    DERIVA_MCP_DERIVA_RESOURCE      -- Resource identifier to exchange to (DERIVA REST)
-    DERIVA_MCP_CLIENT_ID            -- Client ID for Credenza token exchange
     DERIVA_MCP_CLIENT_SECRET        -- Client secret for Credenza token exchange
 
-Optional variables:
-    DERIVA_MCP_TOKEN_CACHE_BUFFER_SECONDS  -- Near-expiry buffer for derived token cache
-                                             (default: 60)
+Optional variables with defaults:
+    DERIVA_MCP_DERIVA_RESOURCE      -- Resource identifier to exchange to
+                                       (default: urn:deriva:rest:service:all)
+    DERIVA_MCP_CLIENT_ID            -- Client ID for Credenza token exchange
+                                       (default: deriva-mcp)
+
+All other variables have sane defaults and are optional.
 """
 
+from pathlib import Path
+from urllib.parse import urlparse, urlunparse
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_CONFIG_FILENAME = "deriva-mcp.env"
+
+_DEFAULT_SEARCH_PATHS: list[Path] = [
+    Path("/etc/deriva-mcp") / _CONFIG_FILENAME,
+    Path.home() / _CONFIG_FILENAME,
+    Path(".") / _CONFIG_FILENAME,
+]
+
+
+def find_config_file(explicit: str | None = None) -> str | None:
+    """Return the path to the env file to load, or None if none is found.
+
+    If explicit is given, that path is used directly and a FileNotFoundError
+    is raised if it does not exist. Otherwise the default search paths are
+    tried in order and the first existing file is returned.
+
+    Args:
+        explicit: Path supplied via --config; overrides search path.
+
+    Returns:
+        Absolute path string, or None if no config file was found.
+
+    Raises:
+        FileNotFoundError: If explicit is given but the file does not exist.
+    """
+    if explicit is not None:
+        p = Path(explicit)
+        if not p.is_file():
+            raise FileNotFoundError(f"Config file not found: {explicit}")
+        return str(p.resolve())
+
+    for candidate in _DEFAULT_SEARCH_PATHS:
+        if candidate.is_file():
+            return str(candidate.resolve())
+
+    return None
 
 
 class Settings(BaseSettings):
-    """Server configuration loaded from environment variables and optional .env file."""
+    """Server configuration loaded from environment variables and optional env file."""
 
     model_config = SettingsConfigDict(
         env_prefix="DERIVA_MCP_",
-        env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",
     )
 
     # Credenza endpoints and identity
     credenza_url: str = ""
     server_url: str = ""
     server_resource: str = ""
-    deriva_resource: str = ""
+    deriva_resource: str = "urn:deriva:rest:service:all"
+
+    # Hostname remapping for container-internal routing.
+    # Maps external hostnames to internal network aliases, applied to all
+    # outbound HTTP calls (tool hostnames, Credenza URL).
+    # Useful when the public CONTAINER_HOSTNAME (e.g. "localhost") is
+    # unreachable from inside the container but an internal alias (e.g.
+    # "deriva") is available via the Docker internal network.
+    # Set as JSON: DERIVA_MCP_HOSTNAME_MAP={"localhost":"deriva"}
+    hostname_map: dict[str, str] = {}
 
     # Client credentials (confidential client for token exchange)
-    client_id: str = ""
+    client_id: str = "deriva-mcp"
     client_secret: str = ""
 
     # Token cache tuning
@@ -50,6 +112,49 @@ class Settings(BaseSettings):
 
     # Safety
     disable_mutating_tools: bool = True
+
+    # TLS verification for outbound httpx calls (Credenza, ERMrest, Hatrac).
+    # Accepts bool or a path string:
+    #   true  -- verify with the system CA bundle (default)
+    #   false -- disable TLS verification (dev/bypass only)
+    #   /path/to/ca-bundle.pem -- verify using a custom CA certificate or bundle
+    ssl_verify: bool | str = True
+
+    @field_validator("ssl_verify", mode="before")
+    @classmethod
+    def _parse_ssl_verify(cls, v: object) -> object:
+        """Coerce bool-like strings to bool; leave CA bundle paths as strings."""
+        if isinstance(v, str):
+            if v.lower() in ("true", "1", "yes"):
+                return True
+            if v.lower() in ("false", "0", "no"):
+                return False
+        return v
+
+    def remap_url(self, url: str) -> str:
+        """Rewrite url's hostname using hostname_map.
+
+        Replaces the hostname component of url with the mapped value if a
+        matching entry exists in hostname_map. Port is preserved. Useful for
+        redirecting calls that use a public hostname (e.g. "localhost") to the
+        corresponding internal network alias (e.g. "deriva") when running
+        inside a Docker container where the public hostname resolves to the
+        container itself.
+
+        Returns url unchanged if no mapping applies.
+        """
+        if not self.hostname_map:
+            return url
+        parsed = urlparse(url)
+        new_host = self.hostname_map.get(parsed.hostname or "", "")
+        if not new_host:
+            return url
+        # Preserve port if present; otherwise netloc is just the hostname.
+        if parsed.port:
+            netloc = f"{new_host}:{parsed.port}"
+        else:
+            netloc = new_host
+        return urlunparse(parsed._replace(netloc=netloc))
 
     def validate_for_http(self) -> None:
         """Raise ValueError if any field required for HTTP transport is empty.
@@ -72,6 +177,8 @@ class Settings(BaseSettings):
             )
 
 
-# Module-level singleton -- loaded once at import time.
-# Tests can override by constructing Settings directly with explicit values.
-settings = Settings()
+# Module-level singleton -- loaded once at import time using the search path.
+# Tests override by constructing Settings directly with explicit values.
+# CLI overrides by calling find_config_file(explicit=args.config) and passing
+# the result to Settings(_env_file=path) before calling create_server().
+settings = Settings(_env_file=find_config_file())

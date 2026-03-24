@@ -11,7 +11,6 @@ import pytest
 from deriva_mcp_core.plugin.api import PluginContext, _set_plugin_context
 from deriva_mcp_core.rag.store import Chunk, SearchResult, SourceStats
 
-
 # ---------------------------------------------------------------------------
 # Test infrastructure
 # ---------------------------------------------------------------------------
@@ -25,6 +24,7 @@ class _CapturingMCP:
         def decorator(fn):
             self.tools[fn.__name__] = fn
             return fn
+
         return decorator
 
     def resource(self, *a: Any, **kw: Any):
@@ -63,8 +63,7 @@ class _MockStore:
         for c in self.chunks:
             stats[c.source] = stats.get(c.source, 0) + 1
         return {
-            src: SourceStats(chunk_count=count, indexed_at=None)
-            for src, count in stats.items()
+            src: SourceStats(chunk_count=count, indexed_at=None) for src, count in stats.items()
         }
 
 
@@ -115,6 +114,7 @@ def _register_rag(ctx, store) -> tuple[dict[str, Any], MagicMock]:
     ):
         mock_settings_cls.return_value = _make_settings()
         from deriva_mcp_core.rag import register
+
         register(ctx)
 
     return ctx._mcp.tools, mock_docs_mgr
@@ -130,6 +130,7 @@ class TestRegisterDisabled:
         with patch("deriva_mcp_core.rag.config.RAGSettings") as mock_cls:
             mock_cls.return_value = _make_settings(enabled=False)
             from deriva_mcp_core.rag import register
+
             register(ctx)
         rag_tools = {k for k in ctx._mcp.tools if k.startswith("rag_")}
         assert not rag_tools
@@ -150,15 +151,17 @@ class TestRegisterDisabled:
 
 class TestRagSearch:
     async def test_returns_results(self, ctx, mock_store):
-        mock_store.set_search_results([
-            SearchResult(
-                text="Some result text",
-                source="deriva-py-docs:docs/guide.md",
-                doc_type="user-guide",
-                score=0.92,
-                metadata={},
-            )
-        ])
+        mock_store.set_search_results(
+            [
+                SearchResult(
+                    text="Some result text",
+                    source="deriva-py-docs:docs/guide.md",
+                    doc_type="user-guide",
+                    score=0.92,
+                    metadata={},
+                )
+            ]
+        )
         tools, _ = _register_rag(ctx, mock_store)
         result = json.loads(await tools["rag_search"]("how to connect"))
         assert isinstance(result, list)
@@ -173,13 +176,13 @@ class TestRagSearch:
     async def test_error_returns_error_key(self, ctx, mock_store):
         async def _fail(*a, **kw):
             raise RuntimeError("boom")
+
         mock_store.search = _fail
         tools, _ = _register_rag(ctx, mock_store)
         result = json.loads(await tools["rag_search"]("query"))
         assert "error" in result
 
     async def test_doc_type_filter_passed_to_store(self, ctx, mock_store):
-        original_search = mock_store.search
         captured_where: list = []
 
         async def _capturing_search(query, limit=10, where=None):
@@ -190,6 +193,46 @@ class TestRagSearch:
         tools, _ = _register_rag(ctx, mock_store)
         await tools["rag_search"]("q", doc_type="schema")
         assert captured_where[0] == {"doc_type": "schema"}
+
+    async def test_hostname_catalog_does_not_inject_source_prefix_into_store(
+        self, ctx, mock_store
+    ):
+        # Regression: hostname+catalog_id previously put a bogus "source_prefix"
+        # key into the where dict, which caused Chroma to return zero results.
+        captured_where: list = []
+
+        async def _capturing_search(query, limit=10, where=None):
+            captured_where.append(where)
+            return []
+
+        mock_store.search = _capturing_search
+        tools, _ = _register_rag(ctx, mock_store)
+        await tools["rag_search"]("q", hostname="localhost", catalog_id="1")
+        assert captured_where[0] is None
+        assert "source_prefix" not in (captured_where[0] or {})
+
+    async def test_hostname_catalog_filters_out_other_catalog_schema_results(
+        self, ctx, mock_store
+    ):
+        # Schema chunks from a different catalog should be excluded; doc chunks
+        # and same-catalog schema chunks should be kept.
+        from deriva_mcp_core.rag.schema import schema_source_name
+
+        my_source = schema_source_name("localhost", "1", "aabbccdd1122")
+        other_source = schema_source_name("otherhost", "2", "deadbeef9999")
+        mock_store.set_search_results(
+            [
+                SearchResult(text="mine", source=my_source, doc_type="schema", score=0.9, metadata={}),
+                SearchResult(text="other", source=other_source, doc_type="schema", score=0.85, metadata={}),
+                SearchResult(text="doc", source="deriva-py-docs:guide.md", doc_type="user-guide", score=0.8, metadata={}),
+            ]
+        )
+        tools, _ = _register_rag(ctx, mock_store)
+        result = json.loads(await tools["rag_search"]("q", hostname="localhost", catalog_id="1"))
+        sources = [r["source"] for r in result]
+        assert my_source in sources
+        assert other_source not in sources
+        assert "deriva-py-docs:guide.md" in sources
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +286,7 @@ class TestRagStatus:
     async def test_status_error_returns_error_key(self, ctx, mock_store):
         async def _fail() -> dict:
             raise RuntimeError("db down")
+
         mock_store.source_stats = _fail
         tools, _ = _register_rag(ctx, mock_store)
         result = json.loads(await tools["rag_status"]())
@@ -257,13 +301,7 @@ class TestRagStatus:
 class TestRagIndexSchema:
     async def test_indexes_and_returns_hash(self, ctx, mock_store):
         schema_json = {
-            "schemas": {
-                "public": {
-                    "tables": {
-                        "T": {"column_definitions": [], "foreign_keys": []}
-                    }
-                }
-            }
+            "schemas": {"public": {"tables": {"T": {"column_definitions": [], "foreign_keys": []}}}}
         }
         mock_catalog = MagicMock()
         mock_catalog.get.return_value.json.return_value = schema_json
@@ -281,7 +319,9 @@ class TestRagIndexSchema:
         assert len(result["schema_hash"]) == 16
 
     async def test_error_returns_error_key(self, ctx, mock_store):
-        with patch("deriva_mcp_core.context.get_deriva_server", side_effect=RuntimeError("no cred")):
+        with patch(
+            "deriva_mcp_core.context.get_deriva_server", side_effect=RuntimeError("no cred")
+        ):
             tools, _ = _register_rag(ctx, mock_store)
             result = json.loads(await tools["rag_index_schema"]("host.example.org", "1"))
         assert "error" in result
@@ -339,7 +379,9 @@ class TestRagIndexTable:
         assert len(mock_store.chunks) == 0
 
     async def test_error_returns_error_key(self, ctx, mock_store):
-        with patch("deriva_mcp_core.context.get_deriva_server", side_effect=RuntimeError("no cred")):
+        with patch(
+            "deriva_mcp_core.context.get_deriva_server", side_effect=RuntimeError("no cred")
+        ):
             tools, _ = _register_rag(ctx, mock_store)
             result = json.loads(
                 await tools["rag_index_table"]("host.example.org", "1", "public", "Item")

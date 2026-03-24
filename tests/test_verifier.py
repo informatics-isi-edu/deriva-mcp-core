@@ -42,7 +42,13 @@ def _make_verifier(settings: Settings) -> CredenzaTokenVerifier:
 async def test_verify_token_success(httpx_mock, test_settings):
     httpx_mock.add_response(
         url=_introspect_url(test_settings),
-        json={"active": True, "sub": _SUB, "iss": _ISS, "aud": [test_settings.server_resource], "exp": _EXP},
+        json={
+            "active": True,
+            "sub": _SUB,
+            "iss": _ISS,
+            "aud": [test_settings.server_resource],
+            "exp": _EXP,
+        },
     )
     httpx_mock.add_response(
         url=_token_url(test_settings),
@@ -60,7 +66,13 @@ async def test_verify_token_sets_credential(httpx_mock, test_settings):
     """verify_token() sets the per-request contextvar with the derived token."""
     httpx_mock.add_response(
         url=_introspect_url(test_settings),
-        json={"active": True, "sub": _SUB, "iss": _ISS, "aud": [test_settings.server_resource], "exp": _EXP},
+        json={
+            "active": True,
+            "sub": _SUB,
+            "iss": _ISS,
+            "aud": [test_settings.server_resource],
+            "exp": _EXP,
+        },
     )
     httpx_mock.add_response(
         url=_token_url(test_settings),
@@ -75,7 +87,13 @@ async def test_verify_token_sets_user_id(httpx_mock, test_settings):
     """verify_token() sets the per-request user_id contextvar with iss/sub from the MCP token."""
     httpx_mock.add_response(
         url=_introspect_url(test_settings),
-        json={"active": True, "sub": _SUB, "iss": _ISS, "aud": [test_settings.server_resource], "exp": _EXP},
+        json={
+            "active": True,
+            "sub": _SUB,
+            "iss": _ISS,
+            "aud": [test_settings.server_resource],
+            "exp": _EXP,
+        },
     )
     httpx_mock.add_response(
         url=_token_url(test_settings),
@@ -149,7 +167,13 @@ async def test_verify_token_aud_mismatch_returns_none(httpx_mock, test_settings)
 async def test_verify_token_exchange_failure_returns_none(httpx_mock, test_settings):
     httpx_mock.add_response(
         url=_introspect_url(test_settings),
-        json={"active": True, "sub": _SUB, "iss": _ISS, "aud": [test_settings.server_resource], "exp": _EXP},
+        json={
+            "active": True,
+            "sub": _SUB,
+            "iss": _ISS,
+            "aud": [test_settings.server_resource],
+            "exp": _EXP,
+        },
     )
     httpx_mock.add_response(url=_token_url(test_settings), status_code=400)
     result = await _make_verifier(test_settings).verify_token(_TOKEN)

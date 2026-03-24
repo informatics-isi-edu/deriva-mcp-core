@@ -26,7 +26,7 @@ class FileEntry:
     """Metadata for a single file discovered in a GitHub repository tree."""
 
     path: str  # repository-relative path (e.g., "docs/guide.md")
-    sha: str   # Git blob SHA for change detection
+    sha: str  # Git blob SHA for change detection
 
 
 class GitHubCrawler:
@@ -56,10 +56,7 @@ class GitHubCrawler:
         Raises:
             httpx.HTTPStatusError: If the GitHub API returns an error.
         """
-        url = (
-            f"{_GITHUB_API}/repos/{self._owner}/{self._repo}"
-            f"/git/trees/{self._branch}?recursive=1"
-        )
+        url = f"{_GITHUB_API}/repos/{self._owner}/{self._repo}/git/trees/{self._branch}?recursive=1"
         async with httpx.AsyncClient(
             headers={"Accept": "application/vnd.github.v3+json"},
             timeout=30.0,
@@ -100,10 +97,7 @@ class GitHubCrawler:
         Raises:
             httpx.HTTPStatusError: If GitHub returns an error.
         """
-        url = (
-            f"{_GITHUB_RAW}/{self._owner}/{self._repo}"
-            f"/{self._branch}/{entry.path}"
-        )
+        url = f"{_GITHUB_RAW}/{self._owner}/{self._repo}/{self._branch}/{entry.path}"
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(url)
             resp.raise_for_status()

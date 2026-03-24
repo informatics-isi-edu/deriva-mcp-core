@@ -17,10 +17,7 @@ On each request:
 import logging
 from mcp.server.auth.provider import AccessToken
 from .exchange import ExchangeError
-from .introspect import (
-    IntrospectionError,
-    TokenInactiveError,
-)
+from .introspect import IntrospectionError, TokenInactiveError
 from .introspect_cache import IntrospectionCache
 from .token_cache import DerivedTokenCache
 from ..config import Settings
@@ -91,9 +88,7 @@ class CredenzaTokenVerifier:
         set_current_user_id(principal)
 
         display = (
-            result.payload.get("email")
-            or result.payload.get("preferred_username")
-            or result.sub
+            result.payload.get("email") or result.payload.get("preferred_username") or result.sub
         )
         logger.info(
             "Authenticated: principal=%s display=%s aud=%s",

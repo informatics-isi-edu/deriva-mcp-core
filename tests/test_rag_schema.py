@@ -24,14 +24,23 @@ _SCHEMA_JSON = {
                     "comment": "Research datasets",
                     "column_definitions": [
                         {"name": "RID", "type": {"typename": "text"}, "nullok": False},
-                        {"name": "Title", "type": {"typename": "text"}, "nullok": True, "comment": "Dataset title"},
+                        {
+                            "name": "Title",
+                            "type": {"typename": "text"},
+                            "nullok": True,
+                            "comment": "Dataset title",
+                        },
                     ],
                     "keys": [],
                     "foreign_keys": [
                         {
                             "foreign_key_columns": [{"column_name": "Species"}],
                             "referenced_columns": [
-                                {"schema_name": "vocab", "table_name": "Species", "column_name": "RID"}
+                                {
+                                    "schema_name": "vocab",
+                                    "table_name": "Species",
+                                    "column_name": "RID",
+                                }
                             ],
                         }
                     ],

@@ -12,4 +12,3 @@ Modules:
     query    -- Attribute and aggregate queries
     hatrac   -- Hatrac object store basics
 """
-

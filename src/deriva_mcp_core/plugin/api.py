@@ -126,6 +126,7 @@ class PluginContext:
             @functools.wraps(fn)
             async def guarded(*a: Any, **kw: Any) -> Any:
                 return _MUTATIONS_DISABLED_RESPONSE
+
             return mcp_decorator(guarded)
 
         return decorator
@@ -223,7 +224,7 @@ async def _safe_call(fn: Callable[..., Any], *args: Any) -> None:
         logger.exception("Exception in plugin lifecycle hook %r", getattr(fn, "__name__", fn))
 
 
-def _set_plugin_context(ctx: PluginContext) -> None:
+def _set_plugin_context(ctx: PluginContext | None) -> None:
     """Set the server-level singleton. Called once from server.py at startup."""
     global _ctx
     _ctx = ctx
