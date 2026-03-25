@@ -313,6 +313,12 @@ take precedence over the env file.
 | `DERIVA_MCP_CLIENT_ID`                  | No       | `deriva-mcp`                  | This server's client ID (confidential client)        |
 | `DERIVA_MCP_TOKEN_CACHE_BUFFER_SECONDS` | No       | `60`                          | Near-expiry buffer for derived token cache           |
 
+**Logging:**
+
+| Variable            | Required | Default | Description                                         |
+|---------------------|----------|---------|-----------------------------------------------------|
+| `DERIVA_MCP_DEBUG`  | No       | `false` | Set to `true` to enable DEBUG-level logging         |
+
 **Safety:**
 
 | Variable                            | Required | Default | Description                                                                                                                                     |
