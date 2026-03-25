@@ -1,6 +1,9 @@
   ---
   # deriva-mcp-core
 
+  [![CI Status](https://github.com/informatics-isi-edu/deriva-mcp-core/actions/workflows/ci.yaml/badge.svg)](https://github.com/informatics-isi-edu/deriva-mcp-core/actions/workflows/ci.yaml)                                            
+  [![Coverage Status](https://coveralls.io/repos/github/informatics-isi-edu/deriva-mcp-core/badge.svg?branch=main)](https://coveralls.io/github/informatics-isi-edu/deriva-mcp-core?branch=main)
+
   A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server reference implementation
   for the [DERIVA](https://deriva-web.readthedocs.io/) platform.
 

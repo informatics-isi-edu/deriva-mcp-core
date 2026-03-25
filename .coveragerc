@@ -1,0 +1,3 @@
+[run]
+omit =
+    deriva_mcp_core/plugin/loader.py
