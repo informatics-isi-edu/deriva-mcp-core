@@ -144,6 +144,7 @@ def create_server(
             host=host,
             port=port,
             streamable_http_path="/",
+            stateless_http=True,
         )
     else:
         # stdio: read per-hostname credentials from local disk at call time

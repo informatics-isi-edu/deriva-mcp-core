@@ -69,12 +69,18 @@ def _is_401(exc: Exception) -> bool:
     """Return True if exc is an HTTP 401 response from a downstream service.
 
     Uses duck typing so it works with both requests and httpx without an
-    explicit import of either library.
+    explicit import of either library. Also inspects the caused_by attribute
+    because the deriva-py datapath API wraps HTTP errors in DataPathException
+    with the original HTTPError stored as caused_by -- DataPathException itself
+    does not expose a response attribute directly.
     """
-    response = getattr(exc, "response", None)
-    if response is None:
-        return False
-    return getattr(response, "status_code", None) == 401
+    for candidate in (exc, getattr(exc, "caused_by", None)):
+        if candidate is None:
+            continue
+        response = getattr(candidate, "response", None)
+        if response is not None and getattr(response, "status_code", None) == 401:
+            return True
+    return False
 
 
 def invalidate_current_derived_token() -> None:
@@ -238,7 +244,8 @@ def get_catalog(hostname: str, catalog_id: str):
         An ErmrestCatalog authenticated with the current request credential.
     """
     internal = _remap(hostname)
-    catalog = DerivaServer("https", internal, credentials=_get_credential_fn(internal)).connect_ermrest(catalog_id)
+    catalog = DerivaServer("https", internal,
+                           credentials=_get_credential_fn(internal)).connect_ermrest(catalog_id)
     if _catalog_access_fn is not None:
         try:
             _catalog_access_fn(internal, catalog_id)
