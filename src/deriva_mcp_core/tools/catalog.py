@@ -9,12 +9,13 @@ Provides MCP tools for browsing DERIVA catalog structure:
     get_table          -- Full definition of a single table
 """
 
+import asyncio
 import hashlib
 import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from ..context import get_deriva_server
+from ..context import _remap, _set_catalog_access_fn, deriva_call, get_catalog
 from ..plugin.api import fire_catalog_connect
 
 if TYPE_CHECKING:
@@ -55,16 +56,57 @@ def _fk_summary(fk: dict) -> dict[str, Any]:
 
 def _fetch_schema(hostname: str, catalog_id: str) -> dict:
     """Fetch full schema JSON, compute hash, and fire on_catalog_connect hooks."""
-    catalog = get_deriva_server(hostname).connect_ermrest(catalog_id)
-    # Note: derive-py catalog.get() is a synchronous requests call.
-    schema_json = catalog.get("/schema").json()
+    # Pre-claim the slot so _on_catalog_access (triggered by get_catalog below)
+    # does not schedule a redundant background _fetch_schema for the same catalog.
+    _connected_catalogs.add((_remap(hostname), catalog_id))
+    with deriva_call():
+        catalog = get_catalog(hostname, catalog_id)
+        # Note: deriva-py catalog.get() is a synchronous requests call.
+        schema_json = catalog.get("/schema").json()
     schema_hash = _compute_schema_hash(schema_json)
     fire_catalog_connect(hostname, catalog_id, schema_hash, schema_json)
     return schema_json
 
 
+# Per-server-lifetime set of (internal_hostname, catalog_id) pairs whose
+# on_catalog_connect hooks have already been fired. After first access this is
+# just a set lookup -- effectively a noop.
+_connected_catalogs: set[tuple[str, str]] = set()
+_connect_tasks: set[asyncio.Task] = set()
+
+
+def _on_catalog_access(hostname: str, catalog_id: str) -> None:
+    """Callback registered with context.py; fired by get_catalog() on every call.
+
+    Schedules a background schema fetch + on_catalog_connect hook dispatch the
+    first time a given catalog is accessed. Subsequent calls are a set lookup.
+    """
+    key = (hostname, catalog_id)
+    if key in _connected_catalogs:
+        return
+    _connected_catalogs.add(key)
+
+    async def _do() -> None:
+        try:
+            _fetch_schema(hostname, catalog_id)
+        except Exception:
+            logger.debug(
+                "Background on_catalog_connect failed for %s/%s",
+                hostname, catalog_id, exc_info=True,
+            )
+            _connected_catalogs.discard(key)
+
+    try:
+        task = asyncio.get_running_loop().create_task(_do())
+        _connect_tasks.add(task)
+        task.add_done_callback(_connect_tasks.discard)
+    except RuntimeError:
+        pass  # no running event loop (e.g., during import-time tests)
+
+
 def register(ctx: PluginContext) -> None:
     """Register schema introspection tools with the MCP server."""
+    _set_catalog_access_fn(_on_catalog_access)
 
     @ctx.tool(mutates=False)
     async def get_catalog_info(hostname: str, catalog_id: str) -> str:

@@ -30,12 +30,12 @@ from .auth.token_cache import DerivedTokenCache
 from .auth.verifier import CredenzaTokenVerifier
 from .config import Settings, find_config_file
 from .config import settings as _default_settings
-from .context import _set_stdio_credential_fn, init_hostname_map
+from .context import _set_stdio_credential_fn, _set_token_cache, init_hostname_map
 from .plugin.api import PluginContext, _set_plugin_context
 from .plugin.loader import load_plugins
 from .rag import register as _register_rag
 from .telemetry import init_audit_logger
-from .tools import catalog, entity, hatrac, query
+from .tools import annotation, catalog, entity, hatrac, query, schema, vocabulary
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +130,7 @@ def create_server(
     if transport == "http":
         cfg.validate_for_http()
         token_cache = DerivedTokenCache(cfg)
+        _set_token_cache(token_cache)
         introspect_cache = IntrospectionCache(cfg)
         verifier = CredenzaTokenVerifier(cfg, token_cache, introspect_cache)
         auth = AuthSettings(
@@ -158,7 +159,7 @@ def create_server(
     ctx = PluginContext(mcp, disable_mutating_tools=cfg.disable_mutating_tools)
     _set_plugin_context(ctx)
 
-    for module in [catalog, entity, query, hatrac]:
+    for module in [catalog, entity, query, hatrac, vocabulary, annotation, schema]:
         module.register(ctx)
 
     _register_rag(ctx, env_file=env_file)
@@ -209,7 +210,7 @@ def main() -> None:
         parser.error(str(exc))
 
     cfg = Settings(_env_file=config_path)
-    _init_logging()
+    _init_logging(debug=cfg.debug)
     if config_path:
         logger.info("Loaded configuration from: %s", config_path)
     else:

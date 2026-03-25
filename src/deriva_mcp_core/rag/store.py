@@ -87,13 +87,18 @@ def _chunk_metadata(chunk: Chunk, indexed_at: str) -> dict[str, Any]:
 
 
 def _to_chroma_where(where: dict | None) -> dict | None:
-    """Translate a simple key=value dict to a Chroma where clause."""
+    """Translate a simple key=value dict to a Chroma where clause.
+
+    Chroma requires explicit operator syntax: {"field": {"$eq": value}}.
+    The shorthand {"field": value} is not valid in current Chroma versions.
+    """
     if not where:
         return None
     items = list(where.items())
     if len(items) == 1:
-        return {items[0][0]: items[0][1]}
-    return {"$and": [{k: v} for k, v in items]}
+        k, v = items[0]
+        return {k: {"$eq": v}}
+    return {"$and": [{k: {"$eq": v}} for k, v in items]}
 
 
 # ---------------------------------------------------------------------------

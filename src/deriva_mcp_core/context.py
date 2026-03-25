@@ -7,12 +7,13 @@ Tool and resource handlers access DERIVA via the public functions exported from
 this module. Handlers never touch tokens directly.
 
 Public API:
-    get_deriva_server(hostname)  -> DerivaServer   -- connection root for ERMREST operations
-    get_hatrac_store(hostname)  -> HatracStore    -- connection root for Hatrac operations
-    get_request_credential() -> dict        -- credential dict for higher-level APIs
-                                               (e.g. DerivaML)
+    get_catalog(hostname, catalog_id) -> ErmrestCatalog -- authenticated catalog connection
+    get_hatrac_store(hostname)        -> HatracStore     -- connection root for Hatrac operations
+    get_request_credential()          -> dict            -- credential dict for higher-level APIs
+                                                            (e.g. DerivaML)
 """
 
+import contextlib
 import contextvars
 from collections.abc import Callable
 
@@ -48,6 +49,74 @@ def set_current_user_id(user_id: str) -> None:
     Not intended for use in tool or resource handlers.
     """
     _current_user_id.set(user_id)
+
+
+# Module-level reference to the DerivedTokenCache singleton. Set by
+# _set_token_cache() in HTTP mode; None in stdio mode.
+_token_cache_ref: object | None = None
+
+
+def _set_token_cache(cache: object) -> None:
+    """Store a reference to the DerivedTokenCache for use by deriva_call().
+
+    Called once at server startup in HTTP mode. Not for use in tool handlers.
+    """
+    global _token_cache_ref
+    _token_cache_ref = cache
+
+
+def _is_401(exc: Exception) -> bool:
+    """Return True if exc is an HTTP 401 response from a downstream service.
+
+    Uses duck typing so it works with both requests and httpx without an
+    explicit import of either library.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return False
+    return getattr(response, "status_code", None) == 401
+
+
+def invalidate_current_derived_token() -> None:
+    """Evict the derived token for the current principal from the cache.
+
+    Call this after receiving a 401 from a downstream DERIVA service so that
+    the next MCP request triggers a fresh token exchange rather than reusing
+    the stale derived token. No-op in stdio mode or when no cache is set.
+    """
+    cache = _token_cache_ref
+    if cache is None:
+        return
+    principal = _current_user_id.get()
+    if principal is not None:
+        cache.invalidate(principal)  # type: ignore[attr-defined]
+
+
+@contextlib.contextmanager
+def deriva_call():
+    """Context manager for DERIVA tool calls that handles downstream 401s.
+
+    Catches HTTP 401 responses from ERMrest or Hatrac, evicts the stale derived
+    token from the cache, then re-raises so the caller's except block can return
+    a normal error response. The next MCP request for this principal will get a
+    fresh token exchange.
+
+    Usage in a tool handler::
+
+        try:
+            with deriva_call():
+                catalog = get_deriva_server(hostname).connect_ermrest(catalog_id)
+                result = catalog.get(url).json()
+                return json.dumps({...})
+        except Exception as exc:
+            return json.dumps({"error": str(exc)})
+    """
+    try:
+        yield
+    except Exception as exc:
+        if _is_401(exc):
+            invalidate_current_derived_token()
+        raise
 
 
 def get_request_user_id_optional() -> str | None:
@@ -132,27 +201,50 @@ def _remap(hostname: str) -> str:
     return _hostname_map.get(hostname, hostname)
 
 
-def get_deriva_server(hostname: str):
-    """Return an authenticated DerivaServer for the current request context.
+# Optional callback fired whenever any tool calls get_catalog(). Registered
+# by catalog.py at server startup so the RAG subsystem can auto-index schemas
+# without requiring an explicit catalog introspection call first.
+# Signature: (internal_hostname: str, catalog_id: str) -> None
+_catalog_access_fn: Callable[[str, str], None] | None = None
 
-    DerivaServer is the connection root for ERMREST operations. Use it to obtain
-    catalog and alias bindings:
 
-        catalog = get_deriva_server(hostname).connect_ermrest(catalog_id)
-        alias   = get_deriva_server(hostname).connect_ermrest_alias(alias_id)
+def _set_catalog_access_fn(fn: Callable[[str, str], None]) -> None:
+    """Register a callback fired on every get_catalog() call.
+
+    Called once at server startup by catalog.py. The callback receives the
+    remapped (internal) hostname and catalog_id. It must be non-blocking and
+    exception-safe -- any errors are suppressed by the caller.
+    """
+    global _catalog_access_fn
+    _catalog_access_fn = fn
+
+
+def get_catalog(hostname: str, catalog_id: str):
+    """Return an authenticated ErmrestCatalog for the current request context.
+
+    Convenience wrapper around get_deriva_server(hostname).connect_ermrest().
+    Also fires the catalog-access callback (registered by catalog.py at startup)
+    so that RAG schema indexing is triggered automatically on first access --
+    without requiring an explicit catalog introspection tool call.
+
+    Use this in all tool modules instead of the two-step
+    get_deriva_server(hostname).connect_ermrest(catalog_id) pattern.
 
     Args:
         hostname: Hostname of the DERIVA server (e.g. "deriva.example.org").
+        catalog_id: Catalog ID or alias.
 
     Returns:
-        A DerivaServer authenticated with the current request credential.
-
-    Raises:
-        RuntimeError: If called outside a tool or resource handler context
-                      and stdio credential fn is not set.
+        An ErmrestCatalog authenticated with the current request credential.
     """
-    hostname = _remap(hostname)
-    return DerivaServer("https", hostname, credentials=_get_credential_fn(hostname))
+    internal = _remap(hostname)
+    catalog = DerivaServer("https", internal, credentials=_get_credential_fn(internal)).connect_ermrest(catalog_id)
+    if _catalog_access_fn is not None:
+        try:
+            _catalog_access_fn(internal, catalog_id)
+        except Exception:
+            pass
+    return catalog
 
 
 def get_hatrac_store(hostname: str):

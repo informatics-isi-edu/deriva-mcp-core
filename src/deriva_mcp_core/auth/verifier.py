@@ -77,9 +77,9 @@ class CredenzaTokenVerifier:
 
         # Step 3: obtain a DERIVA-scoped derived token via the cache
         try:
-            derived_token = await self._token_cache.get(result.sub, token)
+            derived_token = await self._token_cache.get(principal, token)
         except (ExchangeError, Exception):
-            logger.warning("Token exchange failed for sub=%s", result.sub, exc_info=True)
+            logger.warning("Token exchange failed for principal=%s", principal, exc_info=True)
             audit_event("token_exchange_failed", principal=principal)
             return None
 

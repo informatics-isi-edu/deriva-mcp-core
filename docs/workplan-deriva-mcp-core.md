@@ -43,10 +43,9 @@ Bearer token in request
                                store (derived_token, expires_at) in cache
   -> Set _current_credential contextvar
   -> Tool / resource handler executes
-       -> calls get_deriva_server(hostname)                   [ERMREST tools]
+       -> calls get_catalog(hostname, catalog_id)            [ERMREST tools]
             -> reads _current_credential from contextvar
-            -> returns authenticated DerivaServer
-            -> tool calls .connect_ermrest(catalog_id) -> ErmrestCatalog
+            -> returns authenticated ErmrestCatalog directly
        -- or --
        -> calls get_hatrac_store(hostname)                   [Hatrac tools]
             -> reads _current_credential from contextvar
@@ -67,10 +66,16 @@ Server startup
 
 ### Smart Token Cache
 
-- Keyed by `sub` (from introspection response)
+- Keyed by `principal` (`iss/sub` composite from introspection response) to prevent
+  cross-issuer collisions -- Keycloak and Globus may both issue `sub=alice`, so bare
+  `sub` is an insufficient cache key when multiple IDPs are configured
 - Each entry stores `(derived_token, expires_at)`
-- Near-expiry threshold: configurable, default 60 seconds before expiry
-- Per-`sub` async lock prevents duplicate exchanges under concurrent requests
+- Near-expiry threshold: configurable, default 60 seconds before expiry (proactive eviction)
+- Reactive eviction: `deriva_call()` context manager catches HTTP 401 responses from
+  ERMrest or Hatrac, calls `invalidate_current_derived_token()` (keyed by the
+  per-request `_current_user_id` contextvar which already holds `iss/sub`), then
+  re-raises so the tool returns an error and the next request forces a fresh exchange
+- Per-`principal` async lock prevents duplicate exchanges under concurrent requests
   (double-checked locking pattern)
 - Cache is a server-level singleton
 
@@ -121,9 +126,9 @@ after its own mutation -- no hook required, since the plugin already knows the w
 Inside any registered tool or resource, handlers access DERIVA via one of three public
 functions imported from `deriva_mcp_core`:
 
-- `get_deriva_server(hostname)` -- returns an authenticated `DerivaServer`; use to obtain
-  `ErmrestCatalog` and other bindings:
-  `catalog = get_deriva_server(hostname).connect_ermrest(catalog_id)`
+- `get_catalog(hostname, catalog_id)` -- returns an authenticated `ErmrestCatalog` directly.
+  Replaces the old two-step `get_deriva_server(hostname).connect_ermrest(catalog_id)`.
+  Also fires the `_on_catalog_access` callback that triggers background schema indexing.
 - `get_hatrac_store(hostname)` -- returns an authenticated `HatracStore` for object store
 - `get_request_credential()` -- returns the credential dict for higher-level APIs that
   construct their own client:
@@ -298,15 +303,15 @@ take precedence over the env file.
 
 **Auth (required for HTTP transport):**
 
-| Variable                                | Required | Default                       | Description                                           |
-|-----------------------------------------|----------|-------------------------------|-------------------------------------------------------|
-| `DERIVA_MCP_CREDENZA_URL`               | Yes      | --                            | Credenza base URL                                     |
-| `DERIVA_MCP_SERVER_URL`                 | Yes      | --                            | Public HTTPS URL of this MCP server                   |
-| `DERIVA_MCP_SERVER_RESOURCE`            | Yes      | --                            | Resource identifier for this MCP server (URI or URN)  |
-| `DERIVA_MCP_CLIENT_SECRET`              | Yes      | --                            | This server's client secret                           |
-| `DERIVA_MCP_DERIVA_RESOURCE`            | No       | `urn:deriva:rest:service:all` | Resource identifier to exchange to (DERIVA REST)      |
-| `DERIVA_MCP_CLIENT_ID`                  | No       | `deriva-mcp`                  | This server's client ID (confidential client)         |
-| `DERIVA_MCP_TOKEN_CACHE_BUFFER_SECONDS` | No       | `60`                          | Near-expiry buffer for derived token cache            |
+| Variable                                | Required | Default                       | Description                                          |
+|-----------------------------------------|----------|-------------------------------|------------------------------------------------------|
+| `DERIVA_MCP_CREDENZA_URL`               | Yes      | --                            | Credenza base URL                                    |
+| `DERIVA_MCP_SERVER_URL`                 | Yes      | --                            | Public HTTPS URL of this MCP server                  |
+| `DERIVA_MCP_SERVER_RESOURCE`            | Yes      | --                            | Resource identifier for this MCP server (URI or URN) |
+| `DERIVA_MCP_CLIENT_SECRET`              | Yes      | --                            | This server's client secret                          |
+| `DERIVA_MCP_DERIVA_RESOURCE`            | No       | `urn:deriva:rest:service:all` | Resource identifier to exchange to (DERIVA REST)     |
+| `DERIVA_MCP_CLIENT_ID`                  | No       | `deriva-mcp`                  | This server's client ID (confidential client)        |
+| `DERIVA_MCP_TOKEN_CACHE_BUFFER_SECONDS` | No       | `60`                          | Near-expiry buffer for derived token cache           |
 
 **Safety:**
 
@@ -316,10 +321,10 @@ take precedence over the env file.
 
 **Audit logging:**
 
-| Variable                          | Required | Default                  | Description                                               |
-|-----------------------------------|----------|--------------------------|-----------------------------------------------------------|
-| `DERIVA_MCP_AUDIT_LOGFILE_PATH`   | No       | `deriva-mcp-audit.log`   | Path for rotating JSON audit log file                     |
-| `DERIVA_MCP_AUDIT_USE_SYSLOG`     | No       | `false`                  | Write audit events to syslog (`/dev/log`) instead of file |
+| Variable                        | Required | Default                | Description                                               |
+|---------------------------------|----------|------------------------|-----------------------------------------------------------|
+| `DERIVA_MCP_AUDIT_LOGFILE_PATH` | No       | `deriva-mcp-audit.log` | Path for rotating JSON audit log file                     |
+| `DERIVA_MCP_AUDIT_USE_SYSLOG`   | No       | `false`                | Write audit events to syslog (`/dev/log`) instead of file |
 
 **RAG:**
 
@@ -345,7 +350,7 @@ deriva-mcp-core/
 ├── docs/
 └── src/
     └── deriva_mcp_core/
-        ├── __init__.py          # Public API: get_deriva_server(), get_hatrac_store(), get_request_credential()
+        ├── __init__.py          # Public API: get_catalog(), get_hatrac_store(), get_request_credential()
         ├── server.py            # FastMCP server factory + transport dispatch
         ├── config.py            # Pydantic Settings (DERIVA_MCP_* env vars)
         ├── context.py           # Per-request contextvar (_current_credential)
@@ -438,16 +443,17 @@ Deliverable: `uv sync` and `pytest` run cleanly (zero tests, no errors).
 - `context.py`: `_current_credential: ContextVar[dict | None]`
 - `set_current_credential(cred: dict)` -- called by auth verifier or startup (internal)
 - `get_request_credential() -> dict` -- public; raises if called outside handler context
-- `get_deriva_server(hostname) -> DerivaServer` -- public; reads credential, constructs DerivaServer
+- `get_catalog(hostname, catalog_id) -> ErmrestCatalog` -- public; reads credential, constructs and returns an
+  authenticated ErmrestCatalog
 - `get_hatrac_store(hostname) -> HatracStore` -- public; reads credential, constructs HatracStore
 
 #### 1.3 Public API
 
 Three functions exported from `deriva_mcp_core`:
 
-- `get_deriva_server(hostname) -> DerivaServer` -- authenticated connection root for ERMREST.
-  Tools call `.connect_ermrest(catalog_id)` on the returned server to get an ErmrestCatalog.
-  Also provides `.connect_ermrest_alias()`, `.create_ermrest_catalog()`, etc.
+- `get_catalog(hostname, catalog_id) -> ErmrestCatalog` -- authenticated ErmrestCatalog.
+  Replaces the old two-step `get_deriva_server(hostname).connect_ermrest(catalog_id)`.
+  Also fires the `_on_catalog_access` callback that triggers background schema indexing.
 
 - `get_hatrac_store(hostname) -> HatracStore` -- authenticated connection root for Hatrac object
   store operations. Separate from DerivaServer (distinct URL base, /hatrac/).
@@ -458,7 +464,7 @@ Three functions exported from `deriva_mcp_core`:
   from `deriva.core.get_credential()` (which reads from local disk) to avoid confusion for
   developers familiar with deriva-py.
 
-Deliverable: `get_deriva_server()`, `get_hatrac_store()`, and `get_request_credential()` work with a
+Deliverable: `get_catalog()`, `get_hatrac_store()`, and `get_request_credential()` work with a
 manually set credential. Unit tested.
 
 ---
@@ -484,11 +490,13 @@ No server wiring yet.
 #### 2.3 Smart Token Cache
 
 - `auth/token_cache.py`: `DerivedTokenCache`
-- `async get(sub: str, subject_token: str) -> str`
+- `async get(principal: str, subject_token: str) -> str`
     - Cache hit + not near expiry: return immediately
-    - Miss or near expiry: acquire per-`sub` asyncio.Lock, recheck, exchange, store, return
-- `invalidate(sub: str)` -- for explicit eviction (e.g., on 401 from downstream)
-- Cache entries: `{sub: CacheEntry(derived_token, expires_at)}`
+    - Miss or near expiry: acquire per-`principal` asyncio.Lock, recheck, exchange, store,
+      emit `token_exchange_success` audit event, return
+- `invalidate(principal: str)` -- for explicit eviction (e.g., on 401 from downstream)
+- Cache entries: `{principal: CacheEntry(derived_token, expires_at)}`
+- `principal` is `iss/sub` composite (not bare `sub`) to prevent cross-issuer collisions
 
 Deliverable: Auth layer fully unit tested with `pytest-httpx` mocks of Credenza endpoints.
 No live Credenza dependency required for tests.
@@ -509,9 +517,9 @@ API (including lifecycle hooks) is finalized.
 - `auth/verifier.py`: `CredenzaTokenVerifier` implementing `mcp.server.auth.provider.TokenVerifier`
     - `async verify_token(token: str) -> AccessToken | None`
     - Calls `introspect(token)` -> validates `active` and `aud` contains `DERIVA_MCP_SERVER_RESOURCE`
-    - Calls `token_cache.get(sub, token)` -> derived token
+    - Calls `token_cache.get(principal, token)` -> derived token
     - Calls `set_current_credential({"bearer-token": derived_token})`
-    - Returns `AccessToken(token=derived_token, client_id=sub, scopes=..., expires_at=..., resource=...)`
+    - Returns `AccessToken(token=derived_token, client_id=principal, scopes=..., expires_at=..., resource=...)`
     - Returns `None` on introspection failure, inactive token, or `aud` mismatch (FastMCP
       returns 401 automatically)
 
@@ -580,19 +588,43 @@ computed `schema_hash`. This is the trigger for RAG schema indexing.
 
 - `get_entities(hostname, catalog_id, schema, table, filters?)` -- entity retrieval
 - `insert_entities(hostname, catalog_id, schema, table, entities)` -- POST
-- `update_entities(hostname, catalog_id, schema, table, entities)` -- PUT
+- `update_entities(hostname, catalog_id, schema, table, entities)` -- sparse PUT
 - `delete_entities(hostname, catalog_id, schema, table, filters)` -- DELETE
+
+All four tools use `catalog.getPathBuilder()` (deriva-py datapath API) rather than raw
+ERMrest URLs. In particular:
+
+- `update_entities` uses `EntitySet.update()` which sends `PUT /attributegroup` with only
+  the columns present in the entity dict as targets. Columns omitted from the input are
+  never nulled out -- this is the correct behavior for sparse patch semantics. (Raw
+  `PUT /entity` would null omitted nullable columns, which caused data loss in live testing.)
+- `get_entities` uses `path.entities().fetch(limit=min(limit, 1000))`
+- `delete_entities` requires non-empty `filters` to prevent accidental full-table deletion
+
+All tools are wrapped with `with deriva_call():` for reactive 401 eviction (see 4.8).
+
+On not-found errors (ERMrest table/schema 404 patterns), tools call `_rag_suggestions()`
+to include "did you mean?" hints in the error response when the RAG subsystem is enabled.
 
 #### 4.3 Queries (`tools/query.py`)
 
 - `query_attribute(hostname, catalog_id, path, attributes?)` -- attribute query
 - `query_aggregate(hostname, catalog_id, path, aggregates)` -- aggregate query
 
+The `path` parameter is a caller-supplied ERMrest path expression (e.g.,
+`"isa:Dataset/Status=released"`). Raw HTTP (`catalog.get(url)`) is appropriate here
+because the full path expression is inherently a URL fragment -- there is no datapath
+equivalent for arbitrary user-supplied traversal expressions. Both tools are wrapped
+with `with deriva_call():`.
+
 #### 4.4 Hatrac Object Store (`tools/hatrac.py`)
 
 - `list_namespace(hostname, path)` -- list objects in namespace
 - `get_object_metadata(hostname, path)` -- object metadata (not content)
 - `create_namespace(hostname, path)` -- create namespace
+
+No datapath equivalent exists for Hatrac -- raw `HatracStore` HTTP calls are appropriate.
+All three tools are wrapped with `with deriva_call():`.
 
 #### 4.5 RAG Subsystem (`rag/`)
 
@@ -718,6 +750,35 @@ fire-and-forget async task has negligible cost. The async task holds a reference
 indexing completes, then it is GC'd. There is no service-level credential and no
 re-fetch -- the hook has everything it needs from the original request.
 
+#### 4.8 Reactive 401 Eviction (`context.deriva_call()`)
+
+`deriva_call()` is a context manager exported from `deriva_mcp_core.context` (and
+re-exported from the package root). It wraps any block of code that makes DERIVA or
+Hatrac HTTP calls and handles stale derived-token eviction reactively:
+
+```python
+with deriva_call():
+    catalog = get_catalog(hostname, catalog_id)
+    result = catalog.getPathBuilder().schemas[s].tables[t].entities().fetch()
+```
+
+Implementation:
+
+- `_is_401(exc)` -- duck-typed 401 detection: checks `getattr(exc, "response", None)`
+  and `response.status_code == 401`; works with both `requests` and `httpx` exceptions
+- On a 401: calls `invalidate_current_derived_token()`, which reads `_current_user_id`
+  (already the `iss/sub` principal) and calls `_token_cache_ref.invalidate(principal)`;
+  no-ops gracefully in stdio mode where no cache is registered
+- Re-raises the original exception unconditionally -- the tool's existing error-return
+  path handles it; the next request from the LLM will force a fresh token exchange
+
+`_set_token_cache(cache)` is called from `server.py` at HTTP startup so the module-level
+reference is available before any request arrives. In stdio mode it is never called and
+the reference stays `None`.
+
+Plugin tools written for any DERIVA server should wrap catalog calls with `deriva_call()`
+to get the same reactive eviction behavior automatically.
+
 #### 4.6 Audit Logging (`telemetry/audit/`)
 
 Structured JSON audit log following the Credenza pattern (`python-json-logger`,
@@ -726,9 +787,11 @@ syslog or `TimedRotatingFileHandler` fallback, separate from the application log
 - `audit_event(event, **kwargs)` -- emits a JSON record with `event`, `timestamp`, and
   auto-injected `principal` (from per-request contextvar; omitted for pre-auth events
   where no identity is available yet)
-- Auth events in `verifier.py`: `token_inactive`, `token_introspection_failed`,
-  `token_audience_mismatch` (with principal), `token_exchange_failed` (with principal),
-  `token_verified` (with display name)
+- Auth events: `token_inactive`, `token_introspection_failed`,
+  `token_audience_mismatch` (with principal), `token_exchange_failed` (with principal)
+  -- all from `verifier.py`; `token_exchange_success` (with principal, expires_in)
+  from `token_cache.py` on actual cache-miss exchanges only; `token_verified`
+  (with display name) from `verifier.py`
 - Mutation events in `entity.py` and `hatrac.py`: `entity_insert`, `entity_update`,
   `entity_delete` (with verbatim filters), `hatrac_create_namespace`, plus `_failed`
   variants for each with `error_type`
@@ -751,8 +814,15 @@ syslog or `TimedRotatingFileHandler` fallback, separate from the application log
   operators can confirm the active state at startup
 
 Status notes:
-- ERMREST tools (4.1-4.4), audit logging (4.6), and mutation kill switch (4.7) are
-  implemented and unit tested.
+
+- ERMREST tools (4.1-4.4), audit logging (4.6), mutation kill switch (4.7), and
+  reactive 401 eviction (4.8) are implemented and unit tested.
+- entity.py was rewritten to use the deriva-py datapath API (see 4.2); `update_entities`
+  now uses `PUT /attributegroup` for sparse updates -- validated against a live catalog
+  (2026-03-23); the previous raw `PUT /entity` implementation caused nullable columns to
+  be nulled when not included in the payload.
+- Token cache key changed from bare `sub` to `iss/sub` composite (`principal`) to prevent
+  cross-issuer collisions in multi-IDP deployments (Keycloak + Globus share `sub` space).
 - RAG subsystem (4.5) is implemented and unit tested but has NOT been validated
   end-to-end against real GitHub content, a live ChromaDB instance, or a real DERIVA
   catalog. The chunker, crawler, store, and schema/data indexing pipelines are tested
@@ -789,6 +859,7 @@ These run without live external services. Run with:
 `uv run pytest -m rag`
 
 Human-in-the-loop validation completed 2026-03-23 (Claude Desktop + Claude Code):
+
 - Docs ingestion against real GitHub repositories (ermrest-docs, deriva-py)
 - Full end-to-end `rag_search` against a real DERIVA catalog with live data
 - Entity CRUD tools validated against a live local catalog (query and mutation)
@@ -812,12 +883,78 @@ Deliverable: Full integration test suite passing. Reference compose config docum
 
 ---
 
+### Phase 5.5 -- Tool Parity Extension [DONE -- 2026-03-24]
+
+**Goal:** Close the tool coverage gap between `deriva-mcp-core` and the `deriva-mcp`
+prototype by adding annotation, schema/DDL, and vocabulary tools.
+
+**Completed:** All three tool modules implemented, registered, and unit tested.
+Test count: 234 passing, 6 skipped (up from 181 before this phase).
+
+Post-5.5 improvements also completed (2026-03-24):
+
+- `get_catalog(hostname, catalog_id)` replaces `get_deriva_server(hostname).connect_ermrest(catalog_id)`
+  across all tool modules, context.py, rag/__init__.py, and tests. `get_deriva_server` removed entirely.
+- `DERIVA_MCP_DEBUG=true` env var wired through `Settings.debug` to `_init_logging()`.
+- `token_exchange_success` audit event added to `token_cache.py` (cache-miss exchanges only).
+- Token cache key renamed from `sub` to `principal` (`iss/sub` composite) throughout.
+- Chroma `where` clause fix: `_to_chroma_where` now emits `{"field": {"$eq": value}}` syntax
+  (bare `{"field": value}` is rejected by current Chroma versions).
+- RAG entity error suggestions: pre-filter to `doc_type="schema"` so doc chunks cannot crowd
+  out schema chunks; schema-name re-ranking so keyword-matched entries beat embedding rank;
+  improved hint format ("Did you mean schema: 'Data'? (e.g. Data:Collection)") for table
+  lookups where the schema name needs correcting.
+
+#### 5.5.1 Datapath API Assessment Summary
+
+| Module       | API Strategy                              | Status                                                                 |
+|--------------|-------------------------------------------|------------------------------------------------------------------------|
+| `entity.py`  | Datapath: `getPathBuilder()` + `path.*`   | Done                                                                   |
+| `catalog.py` | Raw HTTP: `catalog.get("/schema")`        | Appropriate; no datapath equivalent for schema introspection           |
+| `query.py`   | Raw HTTP: caller-supplied path expression | Appropriate; datapath cannot express arbitrary user-supplied traversal |
+| `hatrac.py`  | Raw HTTP: `HatracStore` methods           | Appropriate; no datapath equivalent for object store                   |
+
+#### 5.5.2 Annotation Tools (`tools/annotation.py`) [DONE]
+
+16 tools registered. Read tools: `get_table_annotations`, `get_column_annotations`,
+`list_foreign_keys`, `get_handlebars_template_variables`. Write tools apply immediately
+via `getCatalogModel()` + dict mutation + `model.apply()` (no staged model):
+`set_display_annotation`, `set_table_display_name`, `set_row_name_pattern`,
+`set_column_display_name`, `set_visible_columns`, `add_visible_column`,
+`remove_visible_column`, `set_visible_foreign_keys`, `add_visible_foreign_key`,
+`remove_visible_foreign_key`, `set_table_display`, `set_column_display`.
+
+Key difference from deriva-mcp: no `apply_annotations()` step; changes are immediate.
+Fine-grained splice tools (`add_visible_column`, etc.) retained for LLM discoverability.
+
+#### 5.5.3 Schema/DDL Tools (`tools/schema.py`) [DONE]
+
+5 tools: `create_table`, `add_column`, `set_table_description`, `set_column_description`,
+`set_column_nullok`. Uses `ermrest_model` API directly (Column.define, Table.define,
+ForeignKey.define, Schema.create_table, Table.create_column, Table/Column.alter).
+All fire `fire_schema_change()` on success.
+
+#### 5.5.4 Vocabulary Tools (`tools/vocabulary.py`) [DONE]
+
+5 tools: `list_vocabulary_terms`, `lookup_term`, `add_term`, `update_term`, `delete_term`.
+Uses datapath API (`getPathBuilder()`) directly -- no deriva-ml dependency needed.
+`add_term` passes `defaults={"ID","URI"}` so ERMrest auto-generates ID and URI from Name.
+`lookup_term`: server-side Name filter first, then client-side Synonyms array scan.
+`delete_term`: no pre-flight FK check; ERMrest constraint rejection surfaces the error.
+
+#### 5.5.5 deriva-ml Dependency Decision [RESOLVED]
+
+No deriva-ml code was copied. All three modules were implemented using `ermrest_model`
+and the datapath API directly. No utility routines from deriva-ml were needed.
+
+---
+
 ### Phase 6 -- Documentation and Handoff [TODO]
 
 - README: installation, transport modes, configuration reference, plugin authoring guide
 - Plugin authoring guide:
     - How to write a `register(ctx)` function and package entry points
-    - When to use `get_deriva_server()` / `get_hatrac_store()` vs `get_request_credential()`
+    - When to use `get_catalog()` / `get_hatrac_store()` vs `get_request_credential()`
     - How to register and use lifecycle hooks (`on_catalog_connect`, `on_schema_change`)
     - How to extend the RAG subsystem: implementing the `VectorStore` protocol, adding
       custom documentation sources, building a data indexing layer (deriva-ml pattern)
@@ -832,10 +969,14 @@ Deliverable: Full integration test suite passing. Reference compose config docum
 ## Out of Scope
 
 - Backward compatibility with `deriva-mcp` prototype
-- Port of deriva-ml tools (separate effort, handed to deriva-ml developer)
+- Port of deriva-ml domain-specific tools (Dataset, Execution, ML workflow management)
+  -- separate effort, handed to deriva-ml developer; the plugin framework and lifecycle
+  hooks are the handoff artifacts
 - Schema-aware data indexing for DerivaML-specific tables (Dataset, Execution, ML workflows)
   -- belongs in deriva-ml plugin; core provides generic `index_table_data()` primitives and
   the `RowSerializer` protocol as the integration point
+- Generic annotation/schema/vocabulary tools are now IN scope (see Phase 5.5) since these
+  do not depend on DerivaML-specific logic
 - Refresh token handling (Credenza derived sessions are fixed-lifetime, 30 min cap)
 - Dynamic client registration
 - JWKS / JWT token validation (Credenza issues opaque tokens only)

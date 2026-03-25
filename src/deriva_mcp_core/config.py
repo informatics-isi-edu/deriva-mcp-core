@@ -26,6 +26,9 @@ Optional variables with defaults:
     DERIVA_MCP_CLIENT_ID            -- Client ID for Credenza token exchange
                                        (default: deriva-mcp)
 
+Optional debug flag:
+    DERIVA_MCP_DEBUG                -- Set to true to enable DEBUG-level logging (default: false)
+
 All other variables have sane defaults and are optional.
 """
 
@@ -112,6 +115,9 @@ class Settings(BaseSettings):
 
     # Safety
     disable_mutating_tools: bool = True
+
+    # Logging
+    debug: bool = False
 
     # TLS verification for outbound httpx calls (Credenza, ERMrest, Hatrac).
     # Accepts bool or a path string:

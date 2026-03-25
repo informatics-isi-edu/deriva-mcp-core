@@ -68,6 +68,10 @@ ignore = ["E402", "E501"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+addopts = "-vv -r w --tb=short --disable-warnings --cov=deriva_mcp_core --cov-report=term-missing --cov-config=.coveragerc"
+filterwarnings = [
+  "always"
+]
 testpaths = ["tests"]
 markers = [
     "integration: marks tests requiring live Credenza and DERIVA services",

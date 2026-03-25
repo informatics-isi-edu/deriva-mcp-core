@@ -53,9 +53,9 @@ def test_dataclasses_importable() -> None:
 
 def test_public_api_importable() -> None:
     """Public API functions are importable from the top-level package."""
-    from deriva_mcp_core import get_deriva_server, get_hatrac_store, get_request_credential
+    from deriva_mcp_core import get_catalog, get_hatrac_store, get_request_credential
 
-    assert get_deriva_server is not None
+    assert get_catalog is not None
     assert get_hatrac_store is not None
     assert get_request_credential is not None
 

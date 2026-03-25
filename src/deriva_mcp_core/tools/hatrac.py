@@ -12,7 +12,7 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from ..context import get_hatrac_store
+from ..context import deriva_call, get_hatrac_store
 from ..telemetry import audit_event
 
 if TYPE_CHECKING:
@@ -36,16 +36,17 @@ def register(ctx: PluginContext) -> None:
             path: Hatrac namespace path (e.g. "/hatrac/my/namespace").
         """
         try:
-            store = get_hatrac_store(hostname)
-            # Hatrac namespace listing requires trailing slash
-            ns_path = path.rstrip("/") + "/"
-            contents = store.get(ns_path).json()
-            return json.dumps(
-                {
-                    "path": ns_path,
-                    "contents": contents,
-                }
-            )
+            with deriva_call():
+                store = get_hatrac_store(hostname)
+                # Hatrac namespace listing requires trailing slash
+                ns_path = path.rstrip("/") + "/"
+                contents = store.get(ns_path).json()
+                return json.dumps(
+                    {
+                        "path": ns_path,
+                        "contents": contents,
+                    }
+                )
         except Exception as exc:
             logger.error("list_namespace failed: %s", exc)
             return json.dumps({"error": str(exc)})
@@ -62,15 +63,16 @@ def register(ctx: PluginContext) -> None:
             path: Hatrac object path (e.g. "/hatrac/my/namespace/file.txt").
         """
         try:
-            store = get_hatrac_store(hostname)
-            resp = store.head(path)
-            metadata = {k.lower(): v for k, v in resp.headers.items()}
-            return json.dumps(
-                {
-                    "path": path,
-                    "metadata": metadata,
-                }
-            )
+            with deriva_call():
+                store = get_hatrac_store(hostname)
+                resp = store.head(path)
+                metadata = {k.lower(): v for k, v in resp.headers.items()}
+                return json.dumps(
+                    {
+                        "path": path,
+                        "metadata": metadata,
+                    }
+                )
         except Exception as exc:
             logger.error("get_object_metadata failed: %s", exc)
             return json.dumps({"error": str(exc)})
@@ -87,9 +89,10 @@ def register(ctx: PluginContext) -> None:
             path: Namespace path to create (e.g. "/hatrac/my/new/namespace").
         """
         try:
-            store = get_hatrac_store(hostname)
-            ns_path = path.rstrip("/") + "/"
-            store.put(ns_path, data=b"", headers={"Content-Type": "application/x-hatrac-namespace"})
+            with deriva_call():
+                store = get_hatrac_store(hostname)
+                ns_path = path.rstrip("/") + "/"
+                store.put(ns_path, data=b"", headers={"Content-Type": "application/x-hatrac-namespace"})
             audit_event("hatrac_create_namespace", hostname=hostname, path=ns_path)
             return json.dumps(
                 {

@@ -305,11 +305,8 @@ class TestRagIndexSchema:
         }
         mock_catalog = MagicMock()
         mock_catalog.get.return_value.json.return_value = schema_json
-        mock_server = MagicMock()
-        mock_server.connect_ermrest.return_value = mock_catalog
 
-        # Patch before _register_rag so the import inside register() binds the mock
-        with patch("deriva_mcp_core.context.get_deriva_server", return_value=mock_server):
+        with patch("deriva_mcp_core.rag.get_catalog", return_value=mock_catalog):
             tools, _ = _register_rag(ctx, mock_store)
             result = json.loads(await tools["rag_index_schema"]("host.example.org", "1"))
 
@@ -320,7 +317,7 @@ class TestRagIndexSchema:
 
     async def test_error_returns_error_key(self, ctx, mock_store):
         with patch(
-            "deriva_mcp_core.context.get_deriva_server", side_effect=RuntimeError("no cred")
+            "deriva_mcp_core.rag.get_catalog", side_effect=RuntimeError("no cred")
         ):
             tools, _ = _register_rag(ctx, mock_store)
             result = json.loads(await tools["rag_index_schema"]("host.example.org", "1"))
@@ -340,12 +337,10 @@ class TestRagIndexTable:
         ]
         mock_catalog = MagicMock()
         mock_catalog.get.return_value.json.return_value = rows
-        mock_server = MagicMock()
-        mock_server.connect_ermrest.return_value = mock_catalog
 
         with (
-            patch("deriva_mcp_core.context.get_deriva_server", return_value=mock_server),
-            patch("deriva_mcp_core.context.get_request_user_id", return_value="user@test.org"),
+            patch("deriva_mcp_core.rag.get_catalog", return_value=mock_catalog),
+            patch("deriva_mcp_core.rag.get_request_user_id", return_value="user@test.org"),
         ):
             tools, _ = _register_rag(ctx, mock_store)
             result = json.loads(
@@ -362,12 +357,10 @@ class TestRagIndexTable:
     async def test_empty_rows_produces_no_chunks(self, ctx, mock_store):
         mock_catalog = MagicMock()
         mock_catalog.get.return_value.json.return_value = []
-        mock_server = MagicMock()
-        mock_server.connect_ermrest.return_value = mock_catalog
 
         with (
-            patch("deriva_mcp_core.context.get_deriva_server", return_value=mock_server),
-            patch("deriva_mcp_core.context.get_request_user_id", return_value="user@test.org"),
+            patch("deriva_mcp_core.rag.get_catalog", return_value=mock_catalog),
+            patch("deriva_mcp_core.rag.get_request_user_id", return_value="user@test.org"),
         ):
             tools, _ = _register_rag(ctx, mock_store)
             result = json.loads(
@@ -380,7 +373,7 @@ class TestRagIndexTable:
 
     async def test_error_returns_error_key(self, ctx, mock_store):
         with patch(
-            "deriva_mcp_core.context.get_deriva_server", side_effect=RuntimeError("no cred")
+            "deriva_mcp_core.rag.get_catalog", side_effect=RuntimeError("no cred")
         ):
             tools, _ = _register_rag(ctx, mock_store)
             result = json.loads(

@@ -11,7 +11,7 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from ..context import get_deriva_server
+from ..context import deriva_call, get_catalog
 
 if TYPE_CHECKING:
     from ..plugin.api import PluginContext
@@ -39,30 +39,39 @@ def register(ctx: PluginContext) -> None:
             "isa:Dataset"                      -- all rows from isa:Dataset
             "isa:Dataset/Status=released"      -- filtered rows
             "isa:Dataset/isa:Execution"        -- joined tables
+            "isa:Dataset/Status=released"      -- filter only; all columns returned
 
-        The `attributes` list selects which columns to return, e.g.:
+        IMPORTANT: ERMrest requires a column projection after the final path
+        element. When `attributes` is omitted, `/*` is appended automatically
+        so all columns are returned. Do NOT include `/*` in the path yourself --
+        it will be appended for you when attributes is None.
+
+        The `attributes` list selects specific columns to return, e.g.:
             ["RID", "Name", "Status"]
 
         Args:
             hostname: Hostname of the DERIVA server.
             catalog_id: Catalog ID or alias.
-            path: ERMREST path string (without the /attribute/ prefix).
+            path: ERMREST path string (without the /attribute/ prefix or trailing /*).
             attributes: Columns to return. If omitted, all columns are returned.
         """
         try:
-            catalog = get_deriva_server(hostname).connect_ermrest(catalog_id)
-            url = f"/attribute/{path}"
-            if attributes:
-                url += "/" + ",".join(attributes)
-            rows = catalog.get(url).json()
-            return json.dumps(
-                {
-                    "path": path,
-                    "attributes": attributes,
-                    "count": len(rows),
-                    "rows": rows,
-                }
-            )
+            with deriva_call():
+                catalog = get_catalog(hostname, catalog_id)
+                url = f"/attribute/{path}"
+                if attributes:
+                    url += "/" + ",".join(attributes)
+                else:
+                    url += "/*"
+                rows = catalog.get(url).json()
+                return json.dumps(
+                    {
+                        "path": path,
+                        "attributes": attributes,
+                        "count": len(rows),
+                        "rows": rows,
+                    }
+                )
         except Exception as exc:
             logger.error("query_attribute failed: %s", exc)
             return json.dumps({"error": str(exc)})
@@ -93,16 +102,17 @@ def register(ctx: PluginContext) -> None:
             aggregates: List of aggregate expressions.
         """
         try:
-            catalog = get_deriva_server(hostname).connect_ermrest(catalog_id)
-            url = f"/aggregate/{path}/{','.join(aggregates)}"
-            result = catalog.get(url).json()
-            return json.dumps(
-                {
-                    "path": path,
-                    "aggregates": aggregates,
-                    "result": result,
-                }
-            )
+            with deriva_call():
+                catalog = get_catalog(hostname, catalog_id)
+                url = f"/aggregate/{path}/{','.join(aggregates)}"
+                result = catalog.get(url).json()
+                return json.dumps(
+                    {
+                        "path": path,
+                        "aggregates": aggregates,
+                        "result": result,
+                    }
+                )
         except Exception as exc:
             logger.error("query_aggregate failed: %s", exc)
             return json.dumps({"error": str(exc)})

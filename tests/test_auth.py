@@ -165,10 +165,13 @@ async def test_exchange_sends_correct_grant_type(httpx_mock, test_settings):
 # ---------------------------------------------------------------------------
 
 
+_PRINCIPAL = f"{_ISS}/{_SUB}"
+
+
 async def test_cache_miss_triggers_exchange(httpx_mock, test_settings):
     httpx_mock.add_response(url=_token_url(test_settings), json=_EXCHANGE_PAYLOAD)
     cache = DerivedTokenCache(test_settings)
-    token = await cache.get(sub=_SUB, subject_token=_TOKEN)
+    token = await cache.get(principal=_PRINCIPAL, subject_token=_TOKEN)
     assert token == _DERIVED_TOKEN
     assert len(httpx_mock.get_requests()) == 1
 
@@ -176,8 +179,8 @@ async def test_cache_miss_triggers_exchange(httpx_mock, test_settings):
 async def test_cache_hit_does_not_exchange(httpx_mock, test_settings):
     httpx_mock.add_response(url=_token_url(test_settings), json=_EXCHANGE_PAYLOAD)
     cache = DerivedTokenCache(test_settings)
-    first = await cache.get(sub=_SUB, subject_token=_TOKEN)
-    second = await cache.get(sub=_SUB, subject_token=_TOKEN)
+    first = await cache.get(principal=_PRINCIPAL, subject_token=_TOKEN)
+    second = await cache.get(principal=_PRINCIPAL, subject_token=_TOKEN)
     assert first == second == _DERIVED_TOKEN
     # Only one exchange should have been made
     assert len(httpx_mock.get_requests()) == 1
@@ -196,11 +199,11 @@ async def test_cache_near_expiry_triggers_exchange(httpx_mock, test_settings):
     httpx_mock.add_response(url=_token_url(test_settings), json=fresh_payload)
 
     cache = DerivedTokenCache(test_settings)
-    first = await cache.get(sub=_SUB, subject_token=_TOKEN)
+    first = await cache.get(principal=_PRINCIPAL, subject_token=_TOKEN)
     assert first == "near-expiry-token"
 
     # Second call should detect near-expiry and re-exchange
-    second = await cache.get(sub=_SUB, subject_token=_TOKEN)
+    second = await cache.get(principal=_PRINCIPAL, subject_token=_TOKEN)
     assert second == "fresh-token"
     assert len(httpx_mock.get_requests()) == 2
 
@@ -211,30 +214,30 @@ async def test_cache_invalidate_forces_exchange(httpx_mock, test_settings):
     httpx_mock.add_response(url=_token_url(test_settings), json=fresh_payload)
 
     cache = DerivedTokenCache(test_settings)
-    await cache.get(sub=_SUB, subject_token=_TOKEN)
-    cache.invalidate(_SUB)
-    second = await cache.get(sub=_SUB, subject_token=_TOKEN)
+    await cache.get(principal=_PRINCIPAL, subject_token=_TOKEN)
+    cache.invalidate(_PRINCIPAL)
+    second = await cache.get(principal=_PRINCIPAL, subject_token=_TOKEN)
     assert second == "fresh-token"
     assert len(httpx_mock.get_requests()) == 2
 
 
 async def test_cache_concurrent_requests_exchange_once(httpx_mock, test_settings):
-    """Concurrent get() calls for the same sub must only exchange once."""
+    """Concurrent get() calls for the same principal must only exchange once."""
     httpx_mock.add_response(url=_token_url(test_settings), json=_EXCHANGE_PAYLOAD)
     cache = DerivedTokenCache(test_settings)
 
     results = await asyncio.gather(
-        cache.get(sub=_SUB, subject_token=_TOKEN),
-        cache.get(sub=_SUB, subject_token=_TOKEN),
-        cache.get(sub=_SUB, subject_token=_TOKEN),
+        cache.get(principal=_PRINCIPAL, subject_token=_TOKEN),
+        cache.get(principal=_PRINCIPAL, subject_token=_TOKEN),
+        cache.get(principal=_PRINCIPAL, subject_token=_TOKEN),
     )
 
     assert all(r == _DERIVED_TOKEN for r in results)
     assert len(httpx_mock.get_requests()) == 1
 
 
-async def test_cache_independent_subs_exchange_independently(httpx_mock, test_settings):
-    """Different subs each get their own exchange and cache entry."""
+async def test_cache_independent_principals_exchange_independently(httpx_mock, test_settings):
+    """Different principals each get their own exchange and cache entry."""
     httpx_mock.add_response(
         url=_token_url(test_settings),
         json={**_EXCHANGE_PAYLOAD, "access_token": "token-for-alice"},
@@ -244,10 +247,34 @@ async def test_cache_independent_subs_exchange_independently(httpx_mock, test_se
         json={**_EXCHANGE_PAYLOAD, "access_token": "token-for-bob"},
     )
     cache = DerivedTokenCache(test_settings)
-    alice = await cache.get(sub="alice@example.org", subject_token="alice-bearer")
-    bob = await cache.get(sub="bob@example.org", subject_token="bob-bearer")
+    alice = await cache.get(principal="https://idp.example.org/alice", subject_token="alice-bearer")
+    bob = await cache.get(principal="https://idp.example.org/bob", subject_token="bob-bearer")
     assert alice == "token-for-alice"
     assert bob == "token-for-bob"
+    assert len(httpx_mock.get_requests()) == 2
+
+
+async def test_cache_same_sub_different_issuers_are_independent(httpx_mock, test_settings):
+    """Same sub from two different issuers must not share a cache entry."""
+    httpx_mock.add_response(
+        url=_token_url(test_settings),
+        json={**_EXCHANGE_PAYLOAD, "access_token": "token-from-idp-a"},
+    )
+    httpx_mock.add_response(
+        url=_token_url(test_settings),
+        json={**_EXCHANGE_PAYLOAD, "access_token": "token-from-idp-b"},
+    )
+    cache = DerivedTokenCache(test_settings)
+    # Same sub "user-42", but different issuers
+    token_a = await cache.get(
+        principal="https://idp-a.example.org/user-42", subject_token="bearer-a"
+    )
+    token_b = await cache.get(
+        principal="https://idp-b.example.org/user-42", subject_token="bearer-b"
+    )
+    assert token_a == "token-from-idp-a"
+    assert token_b == "token-from-idp-b"
+    # Both required a separate exchange
     assert len(httpx_mock.get_requests()) == 2
 
 

@@ -10,8 +10,8 @@ Plugin entry point contract:
     def register(ctx: PluginContext) -> None:
         @ctx.tool(mutates=False)
         async def my_tool(hostname: str, catalog_id: str) -> str:
-            from deriva_mcp_core import get_deriva_server
-            server = get_deriva_server(hostname)
+            from deriva_mcp_core import get_catalog
+            catalog = get_catalog(hostname, catalog_id)
             ...
 
         ctx.on_catalog_connect(my_schema_hook)

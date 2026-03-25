@@ -13,7 +13,10 @@ import pytest
 from deriva_mcp_core.context import (
     _current_credential,
     _current_user_id,
-    get_deriva_server,
+    _is_401,
+    _set_token_cache,
+    deriva_call,
+    get_catalog,
     get_hatrac_store,
     get_request_credential,
     get_request_user_id,
@@ -128,17 +131,17 @@ def test_credential_is_context_local():
 
 
 # ---------------------------------------------------------------------------
-# get_deriva_server and get_hatrac_store
+# get_catalog and get_hatrac_store
 # ---------------------------------------------------------------------------
 
 
-def test_get_deriva_server_raises_when_no_credential():
-    """get_deriva_server() propagates RuntimeError when no credential is set."""
+def test_get_catalog_raises_when_no_credential():
+    """get_catalog() propagates RuntimeError when no credential is set."""
 
     def check():
         _current_credential.set(None)
         with pytest.raises(RuntimeError, match="No credential in current request context"):
-            get_deriva_server("deriva.example.org")
+            get_catalog("deriva.example.org", "1")
 
     _run_isolated(check)
 
@@ -150,18 +153,6 @@ def test_get_hatrac_store_raises_when_no_credential():
         _current_credential.set(None)
         with pytest.raises(RuntimeError, match="No credential in current request context"):
             get_hatrac_store("deriva.example.org")
-
-    _run_isolated(check)
-
-
-def test_get_deriva_server_returns_object_with_credential():
-    """get_deriva_server() returns a DerivaServer instance when credential is set."""
-    from deriva.core import DerivaServer
-
-    def check():
-        set_current_credential(_BEARER_CRED)
-        server = get_deriva_server("deriva.example.org")
-        assert isinstance(server, DerivaServer)
 
     _run_isolated(check)
 
@@ -227,3 +218,93 @@ def test_user_id_is_context_local():
 
     assert outer_result["uid"] == "outer-user"
     assert outer_result["inner_uid"] == "stdio"
+
+
+# ---------------------------------------------------------------------------
+# _is_401
+# ---------------------------------------------------------------------------
+
+
+def test_is_401_true_for_401_response():
+    exc = Exception("401 Unauthorized")
+    response = type("R", (), {"status_code": 401})()
+    exc.response = response
+    assert _is_401(exc) is True
+
+
+def test_is_401_false_for_403_response():
+    exc = Exception("403 Forbidden")
+    response = type("R", (), {"status_code": 403})()
+    exc.response = response
+    assert _is_401(exc) is False
+
+
+def test_is_401_false_for_no_response():
+    assert _is_401(ValueError("no response attr")) is False
+
+
+def test_is_401_false_for_none_response():
+    exc = Exception()
+    exc.response = None
+    assert _is_401(exc) is False
+
+
+# ---------------------------------------------------------------------------
+# deriva_call
+# ---------------------------------------------------------------------------
+
+
+def test_deriva_call_passthrough_on_success():
+    """deriva_call() does not interfere with normal execution."""
+    with deriva_call():
+        result = 1 + 1
+    assert result == 2
+
+
+def test_deriva_call_reraises_non_401():
+    """deriva_call() re-raises non-401 exceptions without eviction."""
+    with pytest.raises(ValueError, match="something broke"):
+        with deriva_call():
+            raise ValueError("something broke")
+
+
+def test_deriva_call_reraises_401_and_evicts():
+    """deriva_call() evicts the cached token and re-raises on a 401."""
+    evicted = []
+
+    class _FakeCache:
+        def invalidate(self, principal):
+            evicted.append(principal)
+
+    _principal = "https://idp.example.org/user-42"
+
+    def run():
+        _set_token_cache(_FakeCache())
+        set_current_user_id(_principal)
+
+        exc = Exception("401 Unauthorized")
+        exc.response = type("R", (), {"status_code": 401})()
+
+        with pytest.raises(Exception, match="401 Unauthorized"):
+            with deriva_call():
+                raise exc
+
+    _run_isolated(run)
+
+    assert evicted == [_principal]
+
+
+def test_deriva_call_no_op_eviction_when_no_cache():
+    """deriva_call() re-raises 401 gracefully when no cache is registered (stdio mode)."""
+    def run():
+        _set_token_cache(None)
+        set_current_user_id("https://idp.example.org/user")
+
+        exc = Exception("401 Unauthorized")
+        exc.response = type("R", (), {"status_code": 401})()
+
+        with pytest.raises(Exception, match="401 Unauthorized"):
+            with deriva_call():
+                raise exc
+
+    _run_isolated(run)

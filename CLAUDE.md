@@ -38,7 +38,7 @@ Import paths always start from `deriva_mcp_core`, never relative.
 ## Architecture Landmarks
 
 - `context.py` -- per-request `contextvars.ContextVar`; `set_current_credential()`
-  (internal), `get_request_credential()` / `get_deriva_server()` / `get_hatrac_store()`
+  (internal), `get_request_credential()` / `get_catalog()` / `get_hatrac_store()`
   (public API, exported from `__init__.py`)
 - `config.py` -- `Settings(BaseSettings)` with `DERIVA_MCP_` prefix;
   `settings.validate_for_http()` raises on missing required fields (call at
@@ -47,6 +47,68 @@ Import paths always start from `deriva_mcp_core`, never relative.
 - `plugin/` -- `PluginContext` wrapping FastMCP; entry-point loader
 - `tools/` -- built-in DERIVA tool modules, each with `register(ctx: PluginContext)`
 - `server.py` -- `create_server()` factory + CLI entrypoint (Phase 3)
+
+## Tool Implementation Rules
+
+### deriva_call() wrapper
+
+Every tool function that calls into ERMrest or Hatrac must wrap the DERIVA call
+in `with deriva_call():` from `..context`. This context manager catches 401
+responses, evicts the stale derived token for the current principal, and
+re-raises so the MCP framework surfaces the error to the caller.
+
+```python
+from ..context import deriva_call, get_catalog
+
+with deriva_call():
+    catalog = get_catalog(hostname, catalog_id)
+    # ... all DERIVA calls inside the block
+```
+
+The block should contain only the DERIVA I/O. Post-processing (building the
+return dict, emitting audit events) goes outside it.
+
+### Audit logging for mutating tools
+
+Every tool registered with `mutates=True` must emit an `audit_event` on both
+success and failure. Import from `..telemetry`:
+
+```python
+from ..telemetry import audit_event
+```
+
+Rules:
+- **Success event:** named `<module>_<operation>` (e.g. `schema_create_table`,
+  `annotation_set_visible_columns`). Include `hostname`, `catalog_id`, and
+  any targeting fields that identify the object mutated (`schema`, `table`,
+  `column`, `annotation_tag`). Do NOT include the payload value being written.
+- **Failure event:** same name with `_failed` suffix. Include the same
+  targeting fields plus `error_type=type(exc).__name__`. Emit inside the
+  `except` block, after `logger.error(...)`.
+- `principal` and `timestamp` are auto-injected by `audit_event()`; do not
+  pass them manually unless overriding (e.g. pre-auth events in verifier.py).
+- Read-only tools (`mutates=False`) do not need audit events.
+
+Example (from entity.py):
+
+```python
+audit_event(
+    "entity_insert",
+    hostname=hostname,
+    catalog_id=catalog_id,
+    schema=schema,
+    table=table,
+    input_row_count=len(entities),
+    inserted_count=len(inserted),
+)
+```
+
+### Mutation kill switch
+
+Register every tool with an explicit `mutates=` kwarg -- `ctx.tool(mutates=True)`
+or `ctx.tool(mutates=False)`. Omitting it raises `TypeError` at server startup.
+The kill switch (`DERIVA_MCP_DISABLE_MUTATING_TOOLS=true`) blocks all
+`mutates=True` tools before they execute; they return `{"error": "... disabled ..."}`.
 
 ## Testing Tool Modules
 

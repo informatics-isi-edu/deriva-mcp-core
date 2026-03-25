@@ -23,12 +23,23 @@ Submodules:
 
 import json
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from ..context import get_catalog, get_request_user_id
 
 if TYPE_CHECKING:
     from ..plugin.api import PluginContext
 
 logger = logging.getLogger(__name__)
+
+# Module-level reference to the active VectorStore. Set by register() when
+# DERIVA_MCP_RAG_ENABLED=true. None when RAG is disabled or not yet started.
+_rag_store: Any | None = None
+
+
+def get_rag_store() -> Any | None:
+    """Return the active VectorStore, or None if RAG is disabled."""
+    return _rag_store
 
 
 def register(ctx: PluginContext, env_file: str | None = None) -> None:
@@ -58,7 +69,6 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
 
     import urllib.parse
 
-    from ..context import get_deriva_server, get_request_user_id
     from .data import index_table_data
     from .docs import BUILTIN_SOURCES, DocSource, RAGDocsManager
     from .schema import compute_schema_hash, has_schema, index_schema, schema_source_name
@@ -66,6 +76,9 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
 
     store = get_store(settings)
     docs_manager = RAGDocsManager(store, settings)
+
+    global _rag_store
+    _rag_store = store
 
     # Collect all documentation sources: built-ins + plugin-declared
     all_sources: list[DocSource] = list(BUILTIN_SOURCES)
@@ -220,7 +233,7 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
             catalog_id: Catalog ID or alias.
         """
         try:
-            catalog = get_deriva_server(hostname).connect_ermrest(catalog_id)
+            catalog = get_catalog(hostname, catalog_id)
             schema_json = catalog.get("/schema").json()
             schema_hash = compute_schema_hash(schema_json)
             await index_schema(store, hostname, catalog_id, schema_json)
@@ -261,7 +274,7 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
         """
         try:
             enc = lambda v: urllib.parse.quote(str(v), safe="")  # noqa: E731
-            catalog = get_deriva_server(hostname).connect_ermrest(catalog_id)
+            catalog = get_catalog(hostname, catalog_id)
             url = f"/entity/{enc(schema)}:{enc(table)}?limit=1000"
             rows = catalog.get(url).json()
             user_id = get_request_user_id()
