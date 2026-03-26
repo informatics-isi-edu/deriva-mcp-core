@@ -68,7 +68,7 @@ ignore = ["E402", "E501"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-addopts = "-vv -r w --tb=short --disable-warnings --cov=deriva_mcp_core --cov-report=term-missing --cov-config=.coveragerc"
+addopts = "-vv -r w --tb=short --disable-warnings --cov=deriva_mcp_core --cov-report=term-missing"
 filterwarnings = [
   "always"
 ]
@@ -80,7 +80,14 @@ markers = [
 
 [tool.coverage.run]
 source = ["src/deriva_mcp_core"]
-omit = ["tests/*"]
+omit = [
+    "tests/*",
+    "*/plugin/loader.py",
+]
 
 [tool.coverage.report]
 show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+]

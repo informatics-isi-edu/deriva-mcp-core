@@ -306,7 +306,7 @@ class TestRagIndexSchema:
         mock_catalog = MagicMock()
         mock_catalog.get.return_value.json.return_value = schema_json
 
-        with patch("deriva_mcp_core.rag.get_catalog", return_value=mock_catalog):
+        with patch("deriva_mcp_core.rag.tools.get_catalog", return_value=mock_catalog):
             tools, _ = _register_rag(ctx, mock_store)
             result = json.loads(await tools["rag_index_schema"]("host.example.org", "1"))
 
@@ -317,7 +317,7 @@ class TestRagIndexSchema:
 
     async def test_error_returns_error_key(self, ctx, mock_store):
         with patch(
-            "deriva_mcp_core.rag.get_catalog", side_effect=RuntimeError("no cred")
+            "deriva_mcp_core.rag.tools.get_catalog", side_effect=RuntimeError("no cred")
         ):
             tools, _ = _register_rag(ctx, mock_store)
             result = json.loads(await tools["rag_index_schema"]("host.example.org", "1"))
@@ -339,8 +339,8 @@ class TestRagIndexTable:
         mock_catalog.get.return_value.json.return_value = rows
 
         with (
-            patch("deriva_mcp_core.rag.get_catalog", return_value=mock_catalog),
-            patch("deriva_mcp_core.rag.get_request_user_id", return_value="user@test.org"),
+            patch("deriva_mcp_core.rag.tools.get_catalog", return_value=mock_catalog),
+            patch("deriva_mcp_core.rag.tools.get_request_user_id", return_value="user@test.org"),
         ):
             tools, _ = _register_rag(ctx, mock_store)
             result = json.loads(
@@ -359,8 +359,8 @@ class TestRagIndexTable:
         mock_catalog.get.return_value.json.return_value = []
 
         with (
-            patch("deriva_mcp_core.rag.get_catalog", return_value=mock_catalog),
-            patch("deriva_mcp_core.rag.get_request_user_id", return_value="user@test.org"),
+            patch("deriva_mcp_core.rag.tools.get_catalog", return_value=mock_catalog),
+            patch("deriva_mcp_core.rag.tools.get_request_user_id", return_value="user@test.org"),
         ):
             tools, _ = _register_rag(ctx, mock_store)
             result = json.loads(
@@ -373,7 +373,7 @@ class TestRagIndexTable:
 
     async def test_error_returns_error_key(self, ctx, mock_store):
         with patch(
-            "deriva_mcp_core.rag.get_catalog", side_effect=RuntimeError("no cred")
+            "deriva_mcp_core.rag.tools.get_catalog", side_effect=RuntimeError("no cred")
         ):
             tools, _ = _register_rag(ctx, mock_store)
             result = json.loads(
