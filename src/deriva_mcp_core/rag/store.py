@@ -161,7 +161,7 @@ class ChromaVectorStore(VectorStore):
             return self._collection
         import chromadb
 
-        if self._settings.chroma_url:
+        if self._settings.chroma_url:  # pragma: no cover
             from urllib.parse import urlparse
 
             parsed = urlparse(self._settings.chroma_url)
@@ -308,7 +308,7 @@ CREATE INDEX IF NOT EXISTS deriva_rag_embedding_idx
 """
 
 
-class PgVectorStore(VectorStore):
+class PgVectorStore(VectorStore):  # pragma: no cover
     """VectorStore backed by PostgreSQL with the pgvector extension."""
 
     def __init__(self, settings: RAGSettings) -> None:

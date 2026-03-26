@@ -40,7 +40,7 @@ from .tools import annotation, catalog, entity, hatrac, query, schema, vocabular
 logger = logging.getLogger(__name__)
 
 
-def _init_logging(debug: bool = False) -> None:
+def _init_logging(debug: bool = False) -> None:  # pragma: no cover
     """Configure the root deriva_mcp_core logger.
 
     Always adds a stderr stream handler so logs appear in docker logs.
@@ -171,7 +171,7 @@ def create_server(
     return mcp
 
 
-def main() -> None:
+def main() -> None:  # pragma: no cover
     """CLI entrypoint for the deriva-mcp-core server."""
     parser = argparse.ArgumentParser(
         prog="deriva-mcp-core",

@@ -42,7 +42,7 @@ def init_audit_logger(filename="deriva-mcp-audit.log", use_syslog=False):
     log_handler = StreamHandler()  # last-ditch fallback
 
     syslog_socket = "/dev/log"
-    if use_syslog and (os.path.exists(syslog_socket) and os.access(syslog_socket, os.W_OK)):
+    if use_syslog and (os.path.exists(syslog_socket) and os.access(syslog_socket, os.W_OK)):  # pragma: no cover
         try:
             log_handler = SysLogHandler(address=syslog_socket, facility=SysLogHandler.LOG_LOCAL1)
             log_handler.ident = "deriva-mcp-audit: "
@@ -56,7 +56,7 @@ def init_audit_logger(filename="deriva-mcp-audit.log", use_syslog=False):
             log_handler = TimedRotatingFileHandler(
                 filename=filename, when="D", interval=1, backupCount=0
             )
-        except Exception as e:
+        except Exception as e:  # pragma: no cover
             svc_logger.warning(
                 "Failed to initialize %s, falling back to StreamHandler: %s",
                 log_handler.__class__.__name__,

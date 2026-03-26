@@ -4,8 +4,8 @@ These tests require the 'rag' optional dependencies (chromadb, asyncpg) and are
 marked with @pytest.mark.rag. They run without any live external services:
 
     ChromaDB   -- embedded, uses a tmp_path directory (no server)
-    PostgreSQL -- spawned in-process via testing.postgresql (skipped on Windows)
-                  also requires the pgvector extension to be installed on the host
+    PostgreSQL -- spawned in-process via testing.postgresql; skipped automatically
+                  if initdb is not on PATH or pgvector extension is not installed
 
 Run all RAG integration tests:
     uv run pytest -m rag
@@ -17,12 +17,11 @@ Notes:
     - ChromaDB downloads the all-MiniLM-L6-v2 embedding model on first run.
       Subsequent runs use the cached model (~25 MB, stored in ~/.cache).
     - pgvector tests require postgresql-<ver>-pgvector on the host system.
-      On Windows these tests are automatically skipped.
+      Tests skip gracefully if PostgreSQL or pgvector is unavailable.
 """
 
 from __future__ import annotations
 
-import platform
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -413,16 +412,14 @@ class TestCatalogConnectHook:
 # PgVectorStore -- requires testing.postgresql + pgvector extension
 # ---------------------------------------------------------------------------
 
-_ON_WINDOWS = platform.system() == "Windows"
 _pg_instance = None
 
-if not _ON_WINDOWS:
-    try:
-        import testing.postgresql as _tpg
+try:
+    import testing.postgresql as _tpg
 
-        _pg_instance = _tpg.Postgresql()
-    except Exception:
-        pass  # initdb missing or other error; pg tests will skip
+    _pg_instance = _tpg.Postgresql()
+except Exception:
+    pass  # initdb not on PATH or PostgreSQL not installed; pg tests will skip
 
 
 def _make_pg_store():
@@ -435,10 +432,8 @@ def _make_pg_store():
 
 @pytest.fixture()
 async def pg_store():
-    if _ON_WINDOWS:
-        pytest.skip("testing.postgresql not supported on Windows")
     if _pg_instance is None:
-        pytest.skip("testing.postgresql instance could not be started")
+        pytest.skip("testing.postgresql not available (PostgreSQL not found)")
 
     store = _make_pg_store()
     try:

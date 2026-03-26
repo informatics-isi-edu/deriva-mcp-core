@@ -839,17 +839,22 @@ mutation kill switch in place. RAG subsystem pending live validation (see Phase 
 
 ---
 
-### Phase 5 -- Integration and Validation [IN PROGRESS]
+### Phase 5 -- Integration and Validation [DONE -- 2026-03-25]
 
 **Goal:** End-to-end validation against live Credenza + DERIVA, and RAG subsystem
 validated against real documentation content and a real catalog.
 
-#### 5.1 Integration Tests
+#### 5.1 Integration Tests [DONE -- live validation, not automated]
 
-- Test `/authorize` -> `/token` -> MCP bearer token flow against Credenza
-- Test token verifier rejects expired/invalid tokens
-- Test token cache hit/miss/near-expiry behavior under concurrent requests
-- Test schema introspection tools against a real DERIVA catalog
+Automated integration tests against live Credenza are not in scope at this stage.
+All validation was done via live deployment and human-in-the-loop testing:
+
+- Full OAuth token lifecycle: introspect -> exchange -> derived token -> ERMrest
+- Token expiry and cache refresh cycle validated (exposed and fixed contextvar
+  propagation bug; see Phase 5.5 post-fixes below)
+- Token verifier rejects expired/invalid tokens (confirmed via Credenza audit logs)
+- Schema introspection, entity CRUD, and attribute query tools validated against a
+  live DERIVA catalog (2026-03-23)
 
 #### 5.2 RAG Integration Tests [DONE]
 
@@ -871,21 +876,126 @@ Human-in-the-loop validation completed 2026-03-23 (Claude Desktop + Claude Code)
 - Entity CRUD tools validated against a live local catalog (query and mutation)
 - pgvector backend validation on Linux with pgvector installed: still TODO
 
-#### 5.3 Plugin Smoke Test
+Natural language prompts used (Claude Code, MCP server configured against local
+deriva-docker stack, catalog 1, test database present):
 
-- Write a minimal `test_plugin` (in the test suite, not a separate package) that uses
-  `PluginContext` to register a custom tool and a lifecycle hook
-- Verify the tool is reachable and executes correctly with proper auth context
-- Verify the lifecycle hook fires when the built-in schema introspection tools run
+**Schema/catalog introspection:**
 
-#### 5.4 Docker Compose Configuration
+```
+List all the schemas in catalog 1 on localhost
+```
 
-- `docker-compose.yml` for running `deriva-mcp-core` alongside Credenza
-- Include PostgreSQL with pgvector extension as the recommended RAG backend
-- Document required env vars for both ChromaDB and pgvector configurations
-- Confirm `/health` suitable for Docker health probes
+```
+What tables are in the isa schema of catalog 1 on localhost? Show me their columns.
+```
 
-Deliverable: Full integration test suite passing. Reference compose config documented.
+```
+Get the full definition for the isa:Dataset table including foreign keys
+```
+
+**Entity CRUD:**
+
+```
+Show me the first 10 rows from isa:Dataset in catalog 1 on localhost
+```
+
+```
+Insert a new dataset into isa:Dataset with Title=Smoke Test Dataset and Description=Created during MCP validation
+```
+
+```
+Update the dataset I just created -- set its Description to Updated during MCP validation
+```
+(validates sparse PUT; original nullable columns must not be nulled out)
+
+```
+Delete the dataset with RID <rid> from isa:Dataset
+```
+(validates filter enforcement; tool must reject empty-filter deletes)
+
+**Attribute/aggregate queries:**
+
+```
+Count how many datasets are in catalog 1 grouped by Status
+```
+
+```
+Query the attribute path isa:Dataset/Status=released and return Title and RID
+```
+
+**RAG:**
+
+```
+Search for documentation about ERMrest foreign key path syntax
+```
+
+```
+Index the schema for catalog 1 on localhost and then search for tables related to experiments
+```
+
+```
+What does rag_status show for the current documentation index?
+```
+
+```
+Update the documentation index for ermrest-docs
+```
+
+**Annotation tools:**
+
+```
+Show me the visible columns configuration for isa:Dataset in catalog 1 on localhost
+```
+
+```
+Set the display name for the isa:Dataset table to Dataset renamed
+```
+
+**Token lifecycle (regression test for stateless_http fix, 2026-03-25):**
+
+Configure CREDENZA_DERIVED_SESSION_MAX_TTL=180 in the deployment, wait 3+ minutes
+after the initial MCP connection, then issue a mutating call that requires an
+authenticated derived session (a read-only call would succeed via anonymous access
+and would not exercise the token path):
+
+```
+Update the Description field of a Replicate entry in catalog 1 on localhost to token refresh test
+```
+
+Validates that derived token expiry and re-exchange is transparent to the LLM --
+the update must succeed without requiring reconnect or reauth.
+
+#### 5.3 Plugin Smoke Test [DONE -- 2026-03-25]
+
+`tests/test_plugin_smoke.py` -- 11 tests covering the full plugin authoring contract:
+
+- **Unified pattern**: one `register(ctx)` declares primary tools (read + write) and RAG
+  components (documentation source via `ctx.rag_source()` + data-indexing lifecycle hook)
+- **Split pattern**: two separate register functions on the same `PluginContext` --
+  `_register_tools_only(ctx)` and `_register_rag_only(ctx)` -- produce identical state,
+  validating that tools and RAG can ship from separate packages/repos
+- Tool execution: read tool returns correct rows (mocked catalog); write tool calls
+  `path.update()` and returns success payload
+- Kill switch: `disable_mutating_tools=True` blocks write tool without touching catalog
+- Lifecycle hook: `fire_catalog_connect()` triggers hook with correct args; split-pattern
+  hook fires the same way; hook exceptions are suppressed (never surface to caller)
+- `ctx.tool()` without `mutates=` raises `TypeError` at registration time
+
+Implementation note documented in the test file: tool functions must import
+`get_catalog` (and `deriva_call`) inside the function body, not at the top of
+`register()`. Outer-scope imports are captured as closures at registration time --
+before any test patch is applied. Inner imports resolve at call time and pick up
+patched values correctly. This is the correct pattern for real plugin authors too.
+
+#### 5.4 Docker Compose Configuration [DONE -- in deriva-docker]
+
+Live deployment uses `deriva-docker` compose stack (Traefik, Apache, Credenza, Keycloak,
+deriva-mcp-core). All required env vars documented and tested in that context.
+`/health` confirmed suitable for Docker health probes.
+A standalone compose config (deriva-mcp-core + Credenza only) is not yet documented
+but is low priority given the deriva-docker reference deployment exists.
+
+Deliverable: Full integration validation complete. Reference deployment operational.
 
 ---
 
@@ -896,6 +1006,19 @@ prototype by adding annotation, schema/DDL, and vocabulary tools.
 
 **Completed:** All three tool modules implemented, registered, and unit tested.
 Test count: 234 passing, 6 skipped (up from 181 before this phase).
+
+Post-5.5 improvements also completed (2026-03-24/25):
+
+- `stateless_http=True` set in `FastMCP` constructor (server.py). In stateful mode the
+  MCP lowlevel server spawns one long-lived task per session, copying the asyncio context
+  at spawn time. When the derived token expires and `verify_token()` exchanges T1->T2, T2
+  is set in the middleware coroutine's context but the long-lived task and all child tasks
+  it spawns still carry T1 -- so ERMrest receives the expired token. With stateless mode
+  each HTTP request spawns a fresh task inside the auth middleware, inheriting the correct
+  per-request credential. Validated against live deployment (2026-03-25).
+- `_is_401()` in context.py extended to inspect `exc.caused_by`: the deriva-py datapath
+  API wraps HTTP errors in `DataPathException` with the original `HTTPError` on `caused_by`;
+  the old single-attribute check missed these.
 
 Post-5.5 improvements also completed (2026-03-24):
 

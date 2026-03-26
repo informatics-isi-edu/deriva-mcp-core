@@ -198,6 +198,72 @@ class TestCatalogTools:
             result = json.loads(await tools["get_catalog_info"]("bad.host", "1"))
         assert "error" in result
 
+    async def test_list_schemas_error(self, ctx):
+        tools = self._register(ctx)
+        with patch("deriva_mcp_core.tools.catalog.get_catalog", side_effect=RuntimeError("boom")):
+            result = json.loads(await tools["list_schemas"]("bad.host", "1"))
+        assert "error" in result
+
+    async def test_get_schema_error(self, ctx):
+        tools = self._register(ctx)
+        with patch("deriva_mcp_core.tools.catalog.get_catalog", side_effect=RuntimeError("boom")):
+            result = json.loads(await tools["get_schema"]("bad.host", "1", "public"))
+        assert "error" in result
+
+    async def test_get_table_schema_not_found(self, ctx, mock_catalog):
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["get_table"]("h", "1", "missing_schema", "MyTable")
+            )
+        assert "error" in result
+        assert "Schema not found" in result["error"]
+
+    async def test_get_table_error(self, ctx):
+        tools = self._register(ctx)
+        with patch("deriva_mcp_core.tools.catalog.get_catalog", side_effect=RuntimeError("boom")):
+            result = json.loads(await tools["get_table"]("bad.host", "1", "public", "T"))
+        assert "error" in result
+
+    async def test_get_table_with_foreign_keys(self, ctx, mock_catalog):
+        """get_table returns FK summaries when the schema has foreign keys."""
+        fk_schema = {
+            "schemas": {
+                "public": {
+                    "comment": None,
+                    "tables": {
+                        "Dataset": {
+                            "comment": "Dataset table",
+                            "kind": "table",
+                            "column_definitions": [
+                                {"name": "RID", "type": {"typename": "ermrest_rid"}, "nullok": False}
+                            ],
+                            "keys": [],
+                            "foreign_keys": [
+                                {
+                                    "foreign_key_columns": [{"column_name": "DatasetType"}],
+                                    "referenced_columns": [
+                                        {"schema_name": "vocab", "table_name": "DatasetType", "column_name": "RID"}
+                                    ],
+                                }
+                            ],
+                        }
+                    },
+                }
+            }
+        }
+        fk_resp = MagicMock()
+        fk_resp.json.return_value = fk_schema
+        fk_catalog = MagicMock()
+        fk_catalog.get.return_value = fk_resp
+        tools = self._register(ctx)
+        with patch("deriva_mcp_core.tools.catalog.get_catalog", return_value=fk_catalog):
+            result = json.loads(await tools["get_table"]("h", "1", "public", "Dataset"))
+        assert result["table"] == "Dataset"
+        assert len(result["foreign_keys"]) == 1
+        assert result["foreign_keys"][0]["columns"] == ["DatasetType"]
+        assert result["foreign_keys"][0]["references"] == "vocab:DatasetType"
+
 
 # ---------------------------------------------------------------------------
 # entity tools
@@ -738,6 +804,98 @@ class TestVocabularyTools:
         assert "error" in result
         assert "disabled" in result["error"]
 
+    async def test_list_vocabulary_terms_error(self, ctx, mock_catalog):
+        mock_catalog.getPathBuilder.side_effect = RuntimeError("boom")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["list_vocabulary_terms"]("h", "1", "vocab", "Tissue")
+            )
+        assert "error" in result
+
+    async def test_lookup_term_synonym_json_string(self, ctx, mock_catalog):
+        """Synonyms stored as JSON string are parsed before matching."""
+        filter_path = MagicMock()
+        filter_path.entities.return_value.fetch.return_value = []
+        mock_catalog._mock_path.filter.return_value = filter_path
+        mock_catalog._mock_path.entities.return_value.fetch.return_value = [
+            {"RID": "1-AAA", "Name": "Brain", "Synonyms": '["Cerebrum", "Neural tissue"]'}
+        ]
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["lookup_term"]("h", "1", "vocab", "Tissue", "Cerebrum")
+            )
+        assert result["term"]["Name"] == "Brain"
+
+    async def test_lookup_term_error(self, ctx, mock_catalog):
+        mock_catalog.getPathBuilder.side_effect = RuntimeError("boom")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["lookup_term"]("h", "1", "vocab", "Tissue", "Brain")
+            )
+        assert "error" in result
+
+    async def test_add_term_error(self, ctx, mock_catalog):
+        mock_catalog._mock_path.insert.side_effect = RuntimeError("conflict")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.vocabulary.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["add_term"]("h", "1", "vocab", "Tissue", "Kidney", "A kidney")
+            )
+        assert "error" in result
+        mock_audit.assert_called_once()
+        assert mock_audit.call_args[0][0] == "vocabulary_add_term_failed"
+
+    async def test_update_term_with_synonyms(self, ctx, mock_catalog):
+        """update_term with synonyms= updates the Synonyms field."""
+        filter_path = MagicMock()
+        filter_path.entities.return_value.fetch.return_value = [{"RID": "1-AAA", "Name": "Brain"}]
+        mock_catalog._mock_path.filter.return_value = filter_path
+        mock_catalog._mock_path.update.return_value = [{"RID": "1-AAA", "Name": "Brain"}]
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["update_term"](
+                    "h", "1", "vocab", "Tissue", "Brain",
+                    synonyms=["Cerebrum", "Neural tissue"],
+                )
+            )
+        assert result["status"] == "updated"
+        update_row = mock_catalog._mock_path.update.call_args[0][0][0]
+        assert update_row["Synonyms"] == ["Cerebrum", "Neural tissue"]
+
+    async def test_update_term_error(self, ctx, mock_catalog):
+        mock_catalog.getPathBuilder.side_effect = RuntimeError("boom")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.vocabulary.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["update_term"](
+                    "h", "1", "vocab", "Tissue", "Brain", description="x"
+                )
+            )
+        assert "error" in result
+        mock_audit.assert_called_once()
+        assert mock_audit.call_args[0][0] == "vocabulary_update_term_failed"
+
+    async def test_delete_term_error(self, ctx, mock_catalog):
+        mock_catalog.getPathBuilder.side_effect = RuntimeError("boom")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.vocabulary.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["delete_term"]("h", "1", "vocab", "Tissue", "Brain")
+            )
+        assert "error" in result
+        mock_audit.assert_called_once()
+        assert mock_audit.call_args[0][0] == "vocabulary_delete_term_failed"
+
 
 # ---------------------------------------------------------------------------
 # annotation tools
@@ -1057,6 +1215,553 @@ class TestAnnotationTools:
         assert "error" in result
         mock_audit.assert_called_once()
         assert mock_audit.call_args[0][0] == "annotation_add_visible_column_failed"
+
+    # -- read tool error paths --
+
+    async def test_get_table_annotations_error(self, ctx, mock_catalog, mock_model):
+        mock_catalog.getCatalogModel.side_effect = RuntimeError("boom")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["get_table_annotations"]("h", "1", "public", "MyTable")
+            )
+        assert "error" in result
+
+    async def test_get_column_annotations_error(self, ctx, mock_catalog, mock_model):
+        mock_catalog.getCatalogModel.side_effect = RuntimeError("boom")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["get_column_annotations"]("h", "1", "public", "MyTable", "Name")
+            )
+        assert "error" in result
+
+    async def test_list_foreign_keys_with_fks(self, ctx, mock_catalog, mock_model):
+        """list_foreign_keys returns outbound and inbound FK data."""
+        model, mock_table, _ = mock_model
+
+        out_col = MagicMock()
+        out_col.name = "DatasetType"
+        ref_col = MagicMock()
+        ref_col.name = "RID"
+        out_fk = MagicMock()
+        out_fk.constraint_schema.name = "public"
+        out_fk.constraint_name = "Dataset_DatasetType_fkey"
+        out_fk.columns = [out_col]
+        out_fk.pk_table.schema.name = "vocab"
+        out_fk.pk_table.name = "DatasetType"
+        out_fk.referenced_columns = [ref_col]
+        mock_table.foreign_keys = [out_fk]
+
+        in_col = MagicMock()
+        in_col.name = "Dataset"
+        in_ref_col = MagicMock()
+        in_ref_col.name = "RID"
+        in_fk = MagicMock()
+        in_fk.constraint_schema.name = "public"
+        in_fk.constraint_name = "File_Dataset_fkey"
+        in_fk.table.schema.name = "public"
+        in_fk.table.name = "File"
+        in_fk.columns = [in_col]
+        in_fk.referenced_columns = [in_ref_col]
+        mock_table.referenced_by = [in_fk]
+
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["list_foreign_keys"]("h", "1", "public", "Dataset")
+            )
+        assert len(result["outbound"]) == 1
+        assert result["outbound"][0]["constraint_name"] == ["public", "Dataset_DatasetType_fkey"]
+        assert result["outbound"][0]["from_columns"] == ["DatasetType"]
+        assert len(result["inbound"]) == 1
+        assert result["inbound"][0]["from_table"] == "File"
+
+    async def test_list_foreign_keys_error(self, ctx, mock_catalog, mock_model):
+        mock_catalog.getCatalogModel.side_effect = RuntimeError("boom")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["list_foreign_keys"]("h", "1", "public", "MyTable")
+            )
+        assert "error" in result
+
+    async def test_get_handlebars_with_foreign_keys(self, ctx, mock_catalog, mock_model):
+        """get_handlebars_template_variables includes FK path variables."""
+        model, mock_table, mock_col = mock_model
+        mock_col.name = "Name"
+        mock_col.type.typename = "text"
+        mock_table.columns.__iter__ = MagicMock(return_value=iter([mock_col]))
+
+        fk_col = MagicMock()
+        fk_col.name = "DatasetType"
+        pk_col = MagicMock()
+        pk_col.name = "RID"
+        fk = MagicMock()
+        fk.constraint_schema.name = "public"
+        fk.constraint_name = "Dataset_Type_fkey"
+        fk.columns = [fk_col]
+        fk.pk_table.name = "DatasetType"
+        fk.pk_table.columns = [pk_col]
+        mock_table.foreign_keys = [fk]
+
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["get_handlebars_template_variables"]("h", "1", "public", "Dataset")
+            )
+        assert len(result["foreign_keys"]) == 1
+        fk_var = result["foreign_keys"][0]
+        assert fk_var["to_table"] == "DatasetType"
+        assert "row_name_template" in fk_var
+
+    async def test_get_handlebars_error(self, ctx, mock_catalog, mock_model):
+        mock_catalog.getCatalogModel.side_effect = RuntimeError("boom")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["get_handlebars_template_variables"]("h", "1", "public", "MyTable")
+            )
+        assert "error" in result
+
+    # -- write tool column branch and error paths --
+
+    async def test_set_display_annotation_on_column(self, ctx, mock_catalog, mock_model):
+        _DISPLAY_TAG = "tag:isrd.isi.edu,2015:display"
+        model, mock_table, mock_col = mock_model
+        mock_col.annotations = {}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["set_display_annotation"](
+                    "h", "1", "public", "MyTable", {"name": "My Col"}, column="Name"
+                )
+            )
+        assert result["status"] == "applied"
+        assert mock_col.annotations[_DISPLAY_TAG] == {"name": "My Col"}
+
+    async def test_set_table_display_name_error(self, ctx, mock_catalog, mock_model):
+        mock_catalog.getCatalogModel.side_effect = RuntimeError("ERMrest error")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.annotation.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["set_table_display_name"]("h", "1", "s", "t", "Name")
+            )
+        assert "error" in result
+        mock_audit.assert_called_once()
+        assert mock_audit.call_args[0][0] == "annotation_set_table_display_name_failed"
+
+    async def test_set_row_name_pattern_error(self, ctx, mock_catalog, mock_model):
+        mock_catalog.getCatalogModel.side_effect = RuntimeError("ERMrest error")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.annotation.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["set_row_name_pattern"]("h", "1", "s", "t", "{{{Name}}}")
+            )
+        assert "error" in result
+        mock_audit.assert_called_once()
+        assert mock_audit.call_args[0][0] == "annotation_set_row_name_pattern_failed"
+
+    # -- set_column_display_name (untested tool) --
+
+    async def test_set_column_display_name(self, ctx, mock_catalog, mock_model):
+        _DISPLAY_TAG = "tag:isrd.isi.edu,2015:display"
+        model, _, mock_col = mock_model
+        mock_col.annotations = {}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["set_column_display_name"](
+                    "h", "1", "public", "MyTable", "Name", "Display Name"
+                )
+            )
+        assert result["status"] == "applied"
+        assert mock_col.annotations[_DISPLAY_TAG]["name"] == "Display Name"
+
+    async def test_set_column_display_name_preserves_other_props(
+        self, ctx, mock_catalog, mock_model
+    ):
+        _DISPLAY_TAG = "tag:isrd.isi.edu,2015:display"
+        model, _, mock_col = mock_model
+        mock_col.annotations = {_DISPLAY_TAG: {"comment": "tooltip", "name": "old"}}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            await tools["set_column_display_name"](
+                "h", "1", "public", "MyTable", "Name", "New Name"
+            )
+        assert mock_col.annotations[_DISPLAY_TAG]["comment"] == "tooltip"
+        assert mock_col.annotations[_DISPLAY_TAG]["name"] == "New Name"
+
+    async def test_set_column_display_name_error(self, ctx, mock_catalog, mock_model):
+        mock_catalog.getCatalogModel.side_effect = RuntimeError("ERMrest error")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.annotation.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["set_column_display_name"]("h", "1", "s", "t", "col", "Name")
+            )
+        assert "error" in result
+        mock_audit.assert_called_once()
+        assert mock_audit.call_args[0][0] == "annotation_set_column_display_name_failed"
+
+    # -- set_visible_columns null branch --
+
+    async def test_set_visible_columns_remove(self, ctx, mock_catalog, mock_model):
+        _VC_TAG = "tag:isrd.isi.edu,2016:visible-columns"
+        model, mock_table, _ = mock_model
+        mock_table.annotations = {_VC_TAG: {"*": ["RID", "Name"]}}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["set_visible_columns"]("h", "1", "public", "MyTable", None)
+            )
+        assert result["status"] == "applied"
+        assert _VC_TAG not in mock_table.annotations
+
+    # -- add_visible_column position branch --
+
+    async def test_add_visible_column_at_position(self, ctx, mock_catalog, mock_model):
+        _VC_TAG = "tag:isrd.isi.edu,2016:visible-columns"
+        model, mock_table, _ = mock_model
+        mock_table.annotations = {_VC_TAG: {"*": ["RID", "Name"]}}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["add_visible_column"](
+                    "h", "1", "public", "MyTable", "*", "Status", position=1
+                )
+            )
+        assert result["status"] == "applied"
+        assert mock_table.annotations[_VC_TAG]["*"][1] == "Status"
+
+    # -- remove_visible_column branches --
+
+    async def test_remove_visible_column_no_annotation(self, ctx, mock_catalog, mock_model):
+        model, mock_table, _ = mock_model
+        mock_table.annotations = {}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["remove_visible_column"]("h", "1", "public", "MyTable", "*", "Name")
+            )
+        assert "error" in result
+
+    async def test_remove_visible_column_by_index(self, ctx, mock_catalog, mock_model):
+        _VC_TAG = "tag:isrd.isi.edu,2016:visible-columns"
+        model, mock_table, _ = mock_model
+        mock_table.annotations = {_VC_TAG: {"*": ["RID", "Name", "Status"]}}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["remove_visible_column"]("h", "1", "public", "MyTable", "*", 1)
+            )
+        assert result["status"] == "applied"
+        assert mock_table.annotations[_VC_TAG]["*"] == ["RID", "Status"]
+
+    async def test_remove_visible_column_index_out_of_range(self, ctx, mock_catalog, mock_model):
+        _VC_TAG = "tag:isrd.isi.edu,2016:visible-columns"
+        model, mock_table, _ = mock_model
+        mock_table.annotations = {_VC_TAG: {"*": ["RID"]}}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["remove_visible_column"]("h", "1", "public", "MyTable", "*", 5)
+            )
+        assert "error" in result
+
+    async def test_remove_visible_column_not_found(self, ctx, mock_catalog, mock_model):
+        _VC_TAG = "tag:isrd.isi.edu,2016:visible-columns"
+        model, mock_table, _ = mock_model
+        mock_table.annotations = {_VC_TAG: {"*": ["RID", "Name"]}}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["remove_visible_column"](
+                    "h", "1", "public", "MyTable", "*", "Missing"
+                )
+            )
+        assert "error" in result
+
+    async def test_remove_visible_column_error(self, ctx, mock_catalog, mock_model):
+        mock_catalog.getCatalogModel.side_effect = RuntimeError("ERMrest error")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.annotation.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["remove_visible_column"]("h", "1", "s", "t", "*", "Name")
+            )
+        assert "error" in result
+        mock_audit.assert_called_once()
+        assert mock_audit.call_args[0][0] == "annotation_remove_visible_column_failed"
+
+    # -- set_visible_foreign_keys null and error --
+
+    async def test_set_visible_foreign_keys_remove(self, ctx, mock_catalog, mock_model):
+        _VFK_TAG = "tag:isrd.isi.edu,2016:visible-foreign-keys"
+        model, mock_table, _ = mock_model
+        mock_table.annotations = {_VFK_TAG: {"*": [["public", "File_Dataset_fkey"]]}}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["set_visible_foreign_keys"]("h", "1", "public", "Dataset", None)
+            )
+        assert result["status"] == "applied"
+        assert _VFK_TAG not in mock_table.annotations
+
+    async def test_set_visible_foreign_keys_error(self, ctx, mock_catalog, mock_model):
+        mock_catalog.getCatalogModel.side_effect = RuntimeError("ERMrest error")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.annotation.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["set_visible_foreign_keys"]("h", "1", "s", "t", {"*": []})
+            )
+        assert "error" in result
+        mock_audit.assert_called_once()
+        assert mock_audit.call_args[0][0] == "annotation_set_visible_foreign_keys_failed"
+
+    # -- add_visible_foreign_key (untested tool) --
+
+    async def test_add_visible_foreign_key(self, ctx, mock_catalog, mock_model):
+        _VFK_TAG = "tag:isrd.isi.edu,2016:visible-foreign-keys"
+        model, mock_table, _ = mock_model
+        mock_table.annotations = {_VFK_TAG: {"*": [["public", "existing_fkey"]]}}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["add_visible_foreign_key"](
+                    "h", "1", "public", "Dataset", "*", ["public", "new_fkey"]
+                )
+            )
+        assert result["status"] == "applied"
+        assert ["public", "new_fkey"] in mock_table.annotations[_VFK_TAG]["*"]
+
+    async def test_add_visible_foreign_key_at_position(self, ctx, mock_catalog, mock_model):
+        _VFK_TAG = "tag:isrd.isi.edu,2016:visible-foreign-keys"
+        model, mock_table, _ = mock_model
+        mock_table.annotations = {_VFK_TAG: {"*": [["public", "fk_a"], ["public", "fk_b"]]}}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["add_visible_foreign_key"](
+                    "h", "1", "public", "Dataset", "*", ["public", "fk_new"], position=1
+                )
+            )
+        assert result["status"] == "applied"
+        assert mock_table.annotations[_VFK_TAG]["*"][1] == ["public", "fk_new"]
+
+    async def test_add_visible_foreign_key_error(self, ctx, mock_catalog, mock_model):
+        mock_catalog.getCatalogModel.side_effect = RuntimeError("ERMrest error")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.annotation.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["add_visible_foreign_key"](
+                    "h", "1", "s", "t", "*", ["public", "fk"]
+                )
+            )
+        assert "error" in result
+        mock_audit.assert_called_once()
+        assert mock_audit.call_args[0][0] == "annotation_add_visible_foreign_key_failed"
+
+    # -- remove_visible_foreign_key (untested tool) --
+
+    async def test_remove_visible_foreign_key_by_value(self, ctx, mock_catalog, mock_model):
+        _VFK_TAG = "tag:isrd.isi.edu,2016:visible-foreign-keys"
+        model, mock_table, _ = mock_model
+        mock_table.annotations = {
+            _VFK_TAG: {"*": [["public", "fk_a"], ["public", "fk_b"]]}
+        }
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["remove_visible_foreign_key"](
+                    "h", "1", "public", "Dataset", "*", ["public", "fk_a"]
+                )
+            )
+        assert result["status"] == "applied"
+        assert ["public", "fk_a"] not in mock_table.annotations[_VFK_TAG]["*"]
+        assert ["public", "fk_b"] in mock_table.annotations[_VFK_TAG]["*"]
+
+    async def test_remove_visible_foreign_key_by_index(self, ctx, mock_catalog, mock_model):
+        _VFK_TAG = "tag:isrd.isi.edu,2016:visible-foreign-keys"
+        model, mock_table, _ = mock_model
+        mock_table.annotations = {_VFK_TAG: {"*": [["public", "fk_a"], ["public", "fk_b"]]}}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["remove_visible_foreign_key"](
+                    "h", "1", "public", "Dataset", "*", 0
+                )
+            )
+        assert result["status"] == "applied"
+        assert len(mock_table.annotations[_VFK_TAG]["*"]) == 1
+
+    async def test_remove_visible_foreign_key_no_annotation(self, ctx, mock_catalog, mock_model):
+        model, mock_table, _ = mock_model
+        mock_table.annotations = {}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["remove_visible_foreign_key"](
+                    "h", "1", "public", "Dataset", "*", ["public", "fk"]
+                )
+            )
+        assert "error" in result
+
+    async def test_remove_visible_foreign_key_index_out_of_range(
+        self, ctx, mock_catalog, mock_model
+    ):
+        _VFK_TAG = "tag:isrd.isi.edu,2016:visible-foreign-keys"
+        model, mock_table, _ = mock_model
+        mock_table.annotations = {_VFK_TAG: {"*": [["public", "fk_a"]]}}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["remove_visible_foreign_key"](
+                    "h", "1", "public", "Dataset", "*", 5
+                )
+            )
+        assert "error" in result
+
+    async def test_remove_visible_foreign_key_not_found(self, ctx, mock_catalog, mock_model):
+        _VFK_TAG = "tag:isrd.isi.edu,2016:visible-foreign-keys"
+        model, mock_table, _ = mock_model
+        mock_table.annotations = {_VFK_TAG: {"*": [["public", "fk_a"]]}}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["remove_visible_foreign_key"](
+                    "h", "1", "public", "Dataset", "*", ["public", "fk_missing"]
+                )
+            )
+        assert "error" in result
+
+    async def test_remove_visible_foreign_key_error(self, ctx, mock_catalog, mock_model):
+        mock_catalog.getCatalogModel.side_effect = RuntimeError("ERMrest error")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.annotation.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["remove_visible_foreign_key"](
+                    "h", "1", "s", "t", "*", ["public", "fk"]
+                )
+            )
+        assert "error" in result
+        mock_audit.assert_called_once()
+        assert mock_audit.call_args[0][0] == "annotation_remove_visible_foreign_key_failed"
+
+    # -- set_table_display (untested tool) --
+
+    async def test_set_table_display(self, ctx, mock_catalog, mock_model):
+        _TD_TAG = "tag:isrd.isi.edu,2016:table-display"
+        model, mock_table, _ = mock_model
+        mock_table.annotations = {}
+        mock_catalog.getCatalogModel.return_value = model
+        td = {"row_name": {"row_markdown_pattern": "{{{Name}}}"}}
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["set_table_display"]("h", "1", "public", "MyTable", td)
+            )
+        assert result["status"] == "applied"
+        assert mock_table.annotations[_TD_TAG] == td
+
+    async def test_set_table_display_remove(self, ctx, mock_catalog, mock_model):
+        _TD_TAG = "tag:isrd.isi.edu,2016:table-display"
+        model, mock_table, _ = mock_model
+        mock_table.annotations = {_TD_TAG: {"row_name": {}}}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["set_table_display"]("h", "1", "public", "MyTable", None)
+            )
+        assert result["status"] == "applied"
+        assert _TD_TAG not in mock_table.annotations
+
+    async def test_set_table_display_error(self, ctx, mock_catalog, mock_model):
+        mock_catalog.getCatalogModel.side_effect = RuntimeError("ERMrest error")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.annotation.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["set_table_display"]("h", "1", "s", "t", {"row_name": {}})
+            )
+        assert "error" in result
+        mock_audit.assert_called_once()
+        assert mock_audit.call_args[0][0] == "annotation_set_table_display_failed"
+
+    # -- set_column_display (untested tool) --
+
+    async def test_set_column_display(self, ctx, mock_catalog, mock_model):
+        _CD_TAG = "tag:isrd.isi.edu,2016:column-display"
+        model, _, mock_col = mock_model
+        mock_col.annotations = {}
+        mock_catalog.getCatalogModel.return_value = model
+        cd = {"*": {"markdown_pattern": "**{{{_value}}}**"}}
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["set_column_display"]("h", "1", "public", "MyTable", "Name", cd)
+            )
+        assert result["status"] == "applied"
+        assert mock_col.annotations[_CD_TAG] == cd
+
+    async def test_set_column_display_remove(self, ctx, mock_catalog, mock_model):
+        _CD_TAG = "tag:isrd.isi.edu,2016:column-display"
+        model, _, mock_col = mock_model
+        mock_col.annotations = {_CD_TAG: {"*": {}}}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["set_column_display"]("h", "1", "public", "MyTable", "Name", None)
+            )
+        assert result["status"] == "applied"
+        assert _CD_TAG not in mock_col.annotations
+
+    async def test_set_column_display_error(self, ctx, mock_catalog, mock_model):
+        mock_catalog.getCatalogModel.side_effect = RuntimeError("ERMrest error")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.annotation.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["set_column_display"]("h", "1", "s", "t", "col", {"*": {}})
+            )
+        assert "error" in result
+        mock_audit.assert_called_once()
+        assert mock_audit.call_args[0][0] == "annotation_set_column_display_failed"
 
 
 # ---------------------------------------------------------------------------
