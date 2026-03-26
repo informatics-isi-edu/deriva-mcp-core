@@ -315,9 +315,9 @@ take precedence over the env file.
 
 **Logging:**
 
-| Variable            | Required | Default | Description                                         |
-|---------------------|----------|---------|-----------------------------------------------------|
-| `DERIVA_MCP_DEBUG`  | No       | `false` | Set to `true` to enable DEBUG-level logging         |
+| Variable           | Required | Default | Description                                 |
+|--------------------|----------|---------|---------------------------------------------|
+| `DERIVA_MCP_DEBUG` | No       | `false` | Set to `true` to enable DEBUG-level logging |
 
 **Safety:**
 
@@ -371,14 +371,15 @@ deriva-mcp-core/
         │   ├── api.py           # PluginContext class (tool/resource/prompt + lifecycle hooks)
         │   └── loader.py        # Entry point discovery and registration
         ├── rag/                 # Built-in RAG subsystem
-        │   ├── __init__.py      # RAGManager singleton; register(ctx) entry point
+        │   ├── __init__.py      # Thin re-export: exposes register() and get_rag_store() from tools.py
         │   ├── config.py        # RAGSettings (DERIVA_MCP_RAG_* vars)
         │   ├── store.py         # VectorStore protocol + ChromaVectorStore + PgVectorStore
         │   ├── chunker.py       # Markdown-aware document chunking
         │   ├── crawler.py       # GitHub repo crawler (Trees API, SHA change detection)
         │   ├── docs.py          # Documentation source ingestion pipeline
         │   ├── schema.py        # Catalog schema indexing (visibility class isolation)
-        │   └── data.py          # Generic data indexing primitives + RowSerializer protocol
+        │   ├── data.py          # Generic data indexing primitives + RowSerializer protocol
+        │   └── tools.py         # register(ctx), get_rag_store(), MCP tool closures
         ├── telemetry/           # Observability
         │   ├── __init__.py      # Re-exports audit_event, init_audit_logger
         │   └── audit/
@@ -572,7 +573,7 @@ Integration test with mocked Credenza confirms auth pipeline end-to-end.
 
 ---
 
-### Phase 4 -- Core ERMREST Tools and RAG Subsystem [PARTIALLY DONE]
+### Phase 4 -- Core ERMREST Tools and RAG Subsystem [DONE]
 
 **Goal:** Built-in tools covering the ERMREST primitive surface, plus the RAG subsystem
 for documentation and schema search.
@@ -634,7 +635,9 @@ All three tools are wrapped with `with deriva_call():`.
 
 #### 4.5 RAG Subsystem (`rag/`)
 
-The RAG module is registered as a built-in plugin via `register(ctx)` in `rag/__init__.py`.
+The RAG module is registered as a built-in plugin via `register(ctx)` in `rag/tools.py`.
+`rag/__init__.py` is a thin re-export that exposes `register` and `get_rag_store` from
+`rag/tools.py`; all implementation lives in `tools.py`.
 It wires up the `on_catalog_connect` lifecycle hook and exposes four MCP tools.
 
 **`rag/config.py`** -- `RAGSettings(BaseSettings)` covering all `DERIVA_MCP_RAG_*` variables.
@@ -728,7 +731,7 @@ class MySerializer:
 ctx.on_catalog_connect(_reindex_data)
 ```
 
-**MCP tools registered by `rag/__init__.py`:**
+**MCP tools registered by `rag/tools.py`:**
 
 - `rag_search(query, limit?, hostname?, catalog_id?, doc_type?)` -- semantic search.
   When `hostname` and `catalog_id` are provided, schema search is scoped to the calling
@@ -741,7 +744,7 @@ ctx.on_catalog_connect(_reindex_data)
 **Lifecycle hook wiring:**
 
 ```python
-# in rag/__init__.py register(ctx):
+# in rag/tools.py register(ctx):
 ctx.on_catalog_connect(_handle_catalog_connect)
 
 
@@ -829,13 +832,12 @@ Status notes:
   be nulled when not included in the payload.
 - Token cache key changed from bare `sub` to `iss/sub` composite (`principal`) to prevent
   cross-issuer collisions in multi-IDP deployments (Keycloak + Globus share `sub` space).
-- RAG subsystem (4.5) is implemented and unit tested but has NOT been validated
-  end-to-end against real GitHub content, a live ChromaDB instance, or a real DERIVA
-  catalog. The chunker, crawler, store, and schema/data indexing pipelines are tested
-  with mocks only. Treat as unproven until Phase 5 integration testing confirms it.
+- RAG subsystem (4.5) is implemented, unit tested, and validated end-to-end in Phase 5
+  (live GitHub crawl, live ChromaDB, live DERIVA catalog). All implementation lives in
+  `rag/tools.py`; `rag/__init__.py` is a thin re-export.
 
 Deliverable: All built-in tools implemented and unit tested. Structured audit log and
-mutation kill switch in place. RAG subsystem pending live validation (see Phase 5).
+mutation kill switch in place. RAG subsystem validated end-to-end in Phase 5.
 
 ---
 
@@ -906,11 +908,13 @@ Insert a new dataset into isa:Dataset with Title=Smoke Test Dataset and Descript
 ```
 Update the dataset I just created -- set its Description to Updated during MCP validation
 ```
+
 (validates sparse PUT; original nullable columns must not be nulled out)
 
 ```
 Delete the dataset with RID <rid> from isa:Dataset
 ```
+
 (validates filter enforcement; tool must reject empty-filter deletes)
 
 **Attribute/aggregate queries:**
@@ -1023,7 +1027,7 @@ Post-5.5 improvements also completed (2026-03-24/25):
 Post-5.5 improvements also completed (2026-03-24):
 
 - `get_catalog(hostname, catalog_id)` replaces `get_deriva_server(hostname).connect_ermrest(catalog_id)`
-  across all tool modules, context.py, rag/__init__.py, and tests. `get_deriva_server` removed entirely.
+  across all tool modules, context.py, rag/tools.py, and tests. `get_deriva_server` removed entirely.
 - `DERIVA_MCP_DEBUG=true` env var wired through `Settings.debug` to `_init_logging()`.
 - `token_exchange_success` audit event added to `token_cache.py` (cache-miss exchanges only).
 - Token cache key renamed from `sub` to `principal` (`iss/sub` composite) throughout.
@@ -1082,7 +1086,7 @@ and the datapath API directly. No utility routines from deriva-ml were needed.
 
 **Goal:** Close the gaps between the prototype and core that belong in the core platform --
 tools with no `deriva-ml` dependency that improve LLM ergonomics or cover missing DERIVA
-primitive operations. Informed by `docs/gap_analysis.md`.
+primitive operations. Informed by [gap_analysis.md](gap_analysis.md).
 
 Each sub-phase is independently mergeable. All new tools follow existing conventions:
 `register(ctx: PluginContext)` closure pattern, explicit `mutates=`, `deriva_call()` wrapper
