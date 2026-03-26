@@ -1078,6 +1078,165 @@ and the datapath API directly. No utility routines from deriva-ml were needed.
 
 ---
 
+### Phase 5.6 -- Core Gap Closure [TODO]
+
+**Goal:** Close the gaps between the prototype and core that belong in the core platform --
+tools with no `deriva-ml` dependency that improve LLM ergonomics or cover missing DERIVA
+primitive operations. Informed by `docs/gap_analysis.md`.
+
+Each sub-phase is independently mergeable. All new tools follow existing conventions:
+`register(ctx: PluginContext)` closure pattern, explicit `mutates=`, `deriva_call()` wrapper
+where applicable, audit events on mutating tools, ASCII-only docstrings.
+
+#### 5.6.1 Query Ergonomics (`tools/query.py`)
+
+**`count_table(hostname, catalog_id, schema, table, filters?)`** -- MCP shorthand that
+issues an ERMrest aggregate query (`@aggregate/cnt=RID`) and returns a plain integer count.
+Optional `filters` is a dict of `{column: value}` equality constraints appended to the
+URL as ERMrest filter predicates. Equivalent to calling `query_aggregate` with a
+`cnt:=cnt(RID)` aggregate, but with a much simpler interface for the common case.
+
+Registered with `mutates=False`. No audit event needed (read-only).
+
+Tests: `tests/test_tools.py` -- mock catalog, verify URL construction for the no-filter
+and single-filter cases; verify integer returned in response.
+
+#### 5.6.2 Annotation Completeness (`tools/annotation.py`)
+
+Five tools covering the annotation ergonomics gap identified in the gap analysis.
+
+**`reorder_visible_columns(hostname, catalog_id, schema, table, context, new_order)`** --
+Read the current `visible-columns` annotation for the given context, apply the caller's
+`new_order` (list of integer indices or column specs), and write back immediately via
+`model.apply()`. `new_order` as integers is interpreted as positional reordering; as column
+specs it is a direct replacement of the list order.
+
+**`reorder_visible_foreign_keys(hostname, catalog_id, schema, table, context, new_order)`** --
+Same pattern for the `visible-foreign-keys` annotation.
+
+**`get_table_sample_data(hostname, catalog_id, schema, table, limit?)`** -- Fetch a small
+number of rows (default 3, max 10) from a table via ERMrest for use in testing Handlebars
+templates. Returns rows as a list of dicts. Uses `get_entities` internally.
+
+**`preview_handlebars_template(template, data)`** -- Render a Handlebars template string
+using the provided `data` dict. Uses the `chevron` library (add to optional `dev` extra or
+a new `annotation` extra). Returns the rendered string or a structured error on parse/render
+failure.
+
+**`validate_template_syntax(template)`** -- Validate a Handlebars template for common
+syntax errors (unmatched braces, unclosed blocks). Uses `chevron`. Returns
+`{"valid": true}` or `{"valid": false, "errors": [...]}`.
+
+Dependency note: `chevron` is a pure-Python Handlebars renderer. Add to `pyproject.toml`
+as an optional dependency under `[project.optional-dependencies] annotation = ["chevron"]`
+and import lazily inside the tool functions so the core server starts without it when not
+installed. Alternatively add to the base dependencies if the footprint is acceptable
+(chevron is ~10 KB, no transitive deps).
+
+All five registered with `mutates=False` (reorder tools write annotations but the mutation
+kill switch should not block annotation management -- use `mutates=True` for the two write
+tools). Reorder tools emit audit events (`annotation_reorder_visible_columns`,
+`annotation_reorder_visible_foreign_keys`).
+
+Correction: `reorder_visible_columns` and `reorder_visible_foreign_keys` write to the
+catalog, so they must be `mutates=True` and must emit audit events.
+
+Tests: extend `tests/test_annotation_tools.py` (or equivalent) to cover each new tool
+with mocked `getCatalogModel()`.
+
+#### 5.6.3 Vocabulary Completeness (`tools/vocabulary.py`)
+
+**`create_vocabulary(hostname, catalog_id, schema, vocabulary_name, comment?)`** --
+Create a new vocabulary table in the specified schema using the ERMrest model API
+(`ermrest_model.Table.define` with the standard vocabulary column set: `Name`, `URI`,
+`Synonyms`, `Description`, `ID`). Fires `fire_schema_change()` on success.
+
+This is a pure `ermrest_model` operation -- no `deriva-ml` dependency. The standard
+vocabulary column pattern is well-defined in the DERIVA spec.
+
+**`add_synonym(hostname, catalog_id, schema, vocabulary, term_name, synonym)`** --
+Read the term via the datapath API, append the new synonym to the `Synonyms` array,
+write back via `update_entities`. Fine-grained tool for LLM ergonomics (avoids
+read-before-write at the LLM prompt level).
+
+**`remove_synonym(hostname, catalog_id, schema, vocabulary, term_name, synonym)`** --
+Same pattern: read, filter out the synonym, write back.
+
+**`update_term_description(hostname, catalog_id, schema, vocabulary, term_name, description)`** --
+Targeted description-only update. More discoverable than `update_term` for this common
+case.
+
+`create_vocabulary` is `mutates=True` with audit event. The synonym/description tools
+are `mutates=True` with audit events.
+
+Tests: mock catalog and model for `create_vocabulary`; datapath mocks for the synonym
+and description tools.
+
+#### 5.6.4 Catalog Admin Tools (`tools/catalog_admin.py`)
+
+A new module for server-level catalog management operations that use the `DerivaServer`
+and `ErmrestCatalog` APIs directly without any `deriva-ml` dependency.
+
+**`create_catalog(hostname, schema_name?)`** -- Create a new empty ERMrest catalog via
+`DerivaServer.create_ermrest_catalog()`. If `schema_name` is provided, creates that schema
+inside the new catalog before returning. Returns the new `catalog_id` and an optional
+`catalog_alias` if one is passed. No `deriva-ml` dependency -- this is a plain catalog
+creation with no ML schema initialization; the caller (or a plugin) is responsible for any
+further schema setup. `mutates=True`. Audit event `catalog_create`.
+
+**`delete_catalog(hostname, catalog_id)`** -- DELETE `/ermrest/catalog/{catalog_id}`.
+Permanently destructive. `mutates=True`. Audit event `catalog_delete`.
+
+**`create_catalog_alias(hostname, alias_name, catalog_id, name?, description?)`** --
+Create an ERMrest alias via `DerivaServer.create_ermrest_alias()`. `mutates=True`.
+Audit event `catalog_alias_create`.
+
+**`update_catalog_alias(hostname, alias_name, alias_target?, owner?)`** --
+Update alias target or owner ACL. `mutates=True`. Audit event `catalog_alias_update`.
+
+**`delete_catalog_alias(hostname, alias_name)`** -- Delete alias (not the target catalog).
+`mutates=True`. Audit event `catalog_alias_delete`.
+
+**`cite(hostname, catalog_id, rid, current?)`** -- Generate a permanent citation URL for
+a catalog entity. `current=False` (default) includes a catalog snapshot timestamp for
+reproducibility; `current=True` returns the live URL. `mutates=False`. No auth required
+for URL construction -- this is a pure string operation using the hostname and RID.
+
+Register `catalog_admin` in `server.py` alongside the other built-in modules.
+
+Tests: mock `DerivaServer` for alias CRUD; verify URL format for `cite`.
+
+#### 5.6.5 RAG Management Tools (`rag/tools.py`)
+
+Three tools extending the existing RAG tool set for operator and LLM control over the
+documentation index.
+
+**`rag_ingest(source_name?)`** -- Force a full re-crawl and reindex of one or all
+documentation sources, ignoring SHA change detection. Use when the incremental update
+(`rag_update_docs`) missed a change or when a full rebuild is needed. Runs inline
+(awaited). Returns per-source chunk counts. `mutates=False` (writes to vector store,
+not the DERIVA catalog).
+
+**`rag_add_source(name, repo_owner, repo_name, branch?, path_prefix?, doc_type?)`** --
+Register a new documentation source at runtime and immediately trigger an incremental
+update for it. Persists the source to `~/.deriva-mcp/rag/sources.json` so it survives
+restarts. Sources added via this tool are merged with plugin-declared sources at startup
+(plugin-declared takes precedence on name conflict). `mutates=False`.
+
+**`rag_remove_source(name)`** -- Remove a runtime-added source from `sources.json` and
+delete all its indexed chunks from the vector store. Cannot remove built-in or
+plugin-declared sources (returns an error if attempted). `mutates=False`.
+
+Implementation note: `sources.json` persistence requires a simple JSON read/write helper
+in `rag/docs.py`. The `RAGDocsManager` should expose `add_source()` and `remove_source()`
+methods that update the in-memory source list and the JSON file atomically (write to temp
+then rename).
+
+Tests: mock vector store and filesystem for add/remove; verify `sources.json` contents;
+verify `rag_ingest` calls `update()` with `force=True`.
+
+---
+
 ### Phase 6 -- Documentation and Handoff [TODO]
 
 - README: installation, transport modes, configuration reference, plugin authoring guide
