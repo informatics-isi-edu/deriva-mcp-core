@@ -188,13 +188,13 @@ async def chat_turn(user_message, session):
 
         while True:
             async with claude.messages.stream(
-                model=settings.claude_model,
-                system=system_prompt(session),
-                tools=session.tools,
-                messages=messages,
+                    model=settings.claude_model,
+                    system=system_prompt(session),
+                    tools=session.tools,
+                    messages=messages,
             ) as stream:
                 async for text in stream.text_stream:
-                    yield sse_text(text)          # -> browser
+                    yield sse_text(text)  # -> browser
 
                 response = await stream.get_final_message()
 
@@ -228,6 +228,7 @@ History is stored server-side, keyed by the session ID (from the session cookie)
 for a single-instance deployment; a Redis backend is provided for multi-instance.
 
 History is trimmed when it approaches Claude's context limit. Two strategies (configurable):
+
 - **Turn-count trim**: keep the last N turns (simple, predictable)
 - **Token-count trim**: keep as many recent turns as fit within a token budget (more
   accurate, requires a token counter)
@@ -242,34 +243,35 @@ The system prompt is not counted as history and is always prepended fresh.
 
 **Required:**
 
-| Variable                          | Description                                                         |
-|-----------------------------------|---------------------------------------------------------------------|
-| `DERIVA_CHATBOT_MCP_URL`          | Base URL of the deriva-mcp-core server                              |
-| `DERIVA_CHATBOT_CREDENZA_URL`     | Base URL of the Credenza instance                                   |
-| `DERIVA_CHATBOT_CLIENT_ID`        | OAuth client ID registered in Credenza for this service             |
-| `DERIVA_CHATBOT_CLIENT_SECRET`    | OAuth client secret                                                 |
-| `DERIVA_CHATBOT_MCP_RESOURCE`     | Resource identifier for the MCP server (must match MCP server config) |
-| `DERIVA_CHATBOT_PUBLIC_URL`       | Public HTTPS URL of this service (used as OAuth redirect base)      |
-| `ANTHROPIC_API_KEY`               | Anthropic API key for Claude                                        |
-| `DERIVA_CHATBOT_SESSION_SECRET`   | Secret key for signing session cookies (random bytes, keep private) |
+| Variable                        | Description                                                           |
+|---------------------------------|-----------------------------------------------------------------------|
+| `DERIVA_CHATBOT_MCP_URL`        | Base URL of the deriva-mcp-core server                                |
+| `DERIVA_CHATBOT_CREDENZA_URL`   | Base URL of the Credenza instance                                     |
+| `DERIVA_CHATBOT_CLIENT_ID`      | OAuth client ID registered in Credenza for this service               |
+| `DERIVA_CHATBOT_CLIENT_SECRET`  | OAuth client secret                                                   |
+| `DERIVA_CHATBOT_MCP_RESOURCE`   | Resource identifier for the MCP server (must match MCP server config) |
+| `DERIVA_CHATBOT_PUBLIC_URL`     | Public HTTPS URL of this service (used as OAuth redirect base)        |
+| `ANTHROPIC_API_KEY`             | Anthropic API key for Claude                                          |
+| `DERIVA_CHATBOT_SESSION_SECRET` | Secret key for signing session cookies (random bytes, keep private)   |
 
 **Default-catalog mode (both required to activate):**
 
 | Variable                               | Description                                    |
 |----------------------------------------|------------------------------------------------|
 | `DERIVA_CHATBOT_DEFAULT_HOSTNAME`      | DERIVA server hostname for the default catalog |
-| `DERIVA_CHATBOT_DEFAULT_CATALOG_ID`   | Catalog ID or alias                            |
-| `DERIVA_CHATBOT_DEFAULT_CATALOG_LABEL`| Display name shown in the UI (optional)        |
+| `DERIVA_CHATBOT_DEFAULT_CATALOG_ID`    | Catalog ID or alias                            |
+| `DERIVA_CHATBOT_DEFAULT_CATALOG_LABEL` | Display name shown in the UI (optional)        |
 
 **Tuning:**
 
-| Variable                           | Default                 | Description                                              |
-|------------------------------------|-------------------------|----------------------------------------------------------|
-| `DERIVA_CHATBOT_CLAUDE_MODEL`      | `claude-sonnet-4-6`     | Claude model ID                                          |
-| `DERIVA_CHATBOT_MAX_HISTORY_TURNS` | `20`                    | Max conversation turns retained in server-side history   |
-| `DERIVA_CHATBOT_SESSION_TTL`       | `28800`                 | Server-side session TTL in seconds (default 8h)          |
-| `DERIVA_CHATBOT_REDIS_URL`         | --                      | Redis URL for session store; if unset, uses in-memory    |
-| `DERIVA_CHATBOT_DEBUG`             | `false`                 | Enable debug logging and show tool calls in the UI       |
+| Variable                             | Default             | Description                                                                                                                                                              |
+|--------------------------------------|---------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `DERIVA_CHATBOT_CLAUDE_MODEL`        | `claude-sonnet-4-6` | Claude model ID                                                                                                                                                          |
+| `DERIVA_CHATBOT_MAX_HISTORY_TURNS`   | `20`                | Max conversation turns retained in server-side history                                                                                                                   |
+| `DERIVA_CHATBOT_SESSION_TTL`         | `28800`             | Server-side session TTL in seconds (default 8h)                                                                                                                          |
+| `DERIVA_CHATBOT_STORAGE_BACKEND`     | `memory`            | Session store backend: `memory`, `redis`, `valkey`, `postgresql`, `sqlite`                                                                                               |
+| `DERIVA_CHATBOT_STORAGE_BACKEND_URL` | --                  | Connection URL for the selected backend (not used for `memory`). Examples: `redis://localhost:6379/0`, `postgresql://user:pass@host/db`, `sqlite:///path/to/sessions.db` |
+| `DERIVA_CHATBOT_DEBUG`               | `false`             | Enable debug logging and show tool calls in the UI                                                                                                                       |
 
 ---
 
@@ -287,7 +289,14 @@ deriva-mcp-ui/
         ├── server.py        # FastAPI app, route registration, lifespan
         ├── config.py        # Settings (DERIVA_CHATBOT_* vars)
         ├── auth.py          # Credenza OAuth client: /login, /callback, /logout routes
-        ├── session.py       # Server-side session store (in-memory + Redis backend)
+        ├── storage/         # Session store backends (mirrors Credenza storage pattern)
+        │   ├── __init__.py  # STORAGE_BACKENDS registry + factory
+        │   ├── base.py      # SessionStore protocol + Session dataclass
+        │   ├── memory.py
+        │   ├── redis.py
+        │   ├── valkey.py
+        │   ├── postgresql.py
+        │   └── sqlite.py
         ├── mcp_client.py    # MCP client wrapper: connect, list_tools, call_tool
         ├── chat.py          # Claude tool-calling loop + SSE response streaming
         └── static/
@@ -306,6 +315,7 @@ to `deriva-mcp-core` over the internal Docker network (e.g., `http://deriva-mcp-
 and to Credenza over the same network or via the public URL (depending on network topology).
 
 Traefik routes:
+
 - `/chatbot/` -> `deriva-mcp-ui:8001`
 
 The MCP URL from the UI service's perspective is the internal network address. The public
@@ -329,9 +339,15 @@ A new client entry is required in `oidc_clients.json` (or equivalent Credenza co
 {
   "client_id": "deriva-mcp-ui",
   "client_secret": "<secret>",
-  "grant_types": ["authorization_code"],
-  "redirect_uris": ["https://example.org/chatbot/callback"],
-  "allowed_resources": ["<DERIVA_MCP_SERVER_RESOURCE>"],
+  "grant_types": [
+    "authorization_code"
+  ],
+  "redirect_uris": [
+    "https://example.org/chatbot/callback"
+  ],
+  "allowed_resources": [
+    "<DERIVA_MCP_SERVER_RESOURCE>"
+  ],
   "token_ttl": 86400
 }
 ```
@@ -383,16 +399,35 @@ catalog var is set, both are set.
 
 **1.3 Session store**
 
-`session.py`:
+`storage/` subpackage, mirroring the Credenza storage backend pattern:
 
-- `Session` dataclass: `user_id`, `bearer_token`, `history`, `tools` (cached tool list),
-  `created_at`, `last_active`
-- `SessionStore` protocol with `get(session_id)`, `set(session_id, session)`,
-  `delete(session_id)` methods
-- `InMemorySessionStore`: dict + TTL eviction (check on access, sweep periodically)
-- `RedisSessionStore`: serializes `Session` to JSON, stores with Redis TTL; activated
-  when `DERIVA_CHATBOT_REDIS_URL` is set
-- Session ID in a signed `HttpOnly Secure SameSite=Lax` cookie via `itsdangerous`
+```
+storage/
+  __init__.py      # STORAGE_BACKENDS registry + factory(backend, url) -> SessionStore
+  base.py          # SessionStore protocol: get / set / delete / sweep
+  memory.py        # In-process dict + TTL sweep (default, dev/single-instance)
+  redis.py         # Redis backend (recommended for multi-instance)
+  valkey.py        # Valkey backend (drop-in Redis-compatible alternative)
+  postgresql.py    # PostgreSQL backend (persistent; survives restarts)
+  sqlite.py        # SQLite backend (lightweight persistent; single-instance VM)
+```
+
+`Session` dataclass (defined in `base.py`): `user_id`, `bearer_token`, `history`,
+`tools` (cached tool list), `created_at`, `last_active`.
+
+The `SessionStore` protocol exposes `get(session_id)`, `set(session_id, session)`,
+`delete(session_id)`, and `sweep()` (evict expired entries). All backends serialize
+`Session` to JSON. The active backend is selected at startup from
+`DERIVA_CHATBOT_STORAGE_BACKEND` + `DERIVA_CHATBOT_STORAGE_BACKEND_URL` via the factory.
+
+Session ID stored in a signed `HttpOnly Secure SameSite=Lax` cookie via `itsdangerous`.
+
+Backend guidance (same as Credenza):
+
+- `memory` -- development and single-worker deployments only; state lost on restart
+- `redis` / `valkey` -- recommended for production multi-instance deployments
+- `postgresql` -- persistent; use when a PostgreSQL instance is already in the stack
+- `sqlite` -- lightweight persistent option for single-instance VM deployments without Redis
 
 Deliverable: `/login` and `/callback` complete the OAuth flow and set a session cookie.
 `/logout` clears it. Protected routes redirect correctly without a session.
@@ -501,7 +536,8 @@ Deliverable: running in the `deriva-docker` compose stack with a real Credenza l
 
 ### Phase 7 -- Hardening
 
-- Redis session store tested and documented (activate via `DERIVA_CHATBOT_REDIS_URL`)
+- All non-memory storage backends tested and documented; backend selection via
+  `DERIVA_CHATBOT_STORAGE_BACKEND` + `DERIVA_CHATBOT_STORAGE_BACKEND_URL`
 - Re-authentication flow: detect 401 from MCP server mid-conversation, preserve
   conversation history in the session, redirect to `/login`, resume after re-auth
 - Input length limit on user messages (prevent runaway context / cost)
