@@ -29,6 +29,8 @@ dependencies = [
     "httpx>=0.27",
     "python-json-logger",
     "deriva",
+    "chevron",
+    "python-dateutil",
 ]
 
 [project.optional-dependencies]

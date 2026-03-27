@@ -66,7 +66,7 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
     global _rag_store
     _rag_store = store
 
-    # Collect all documentation sources: built-ins + plugin-declared
+    # Collect all documentation sources: built-ins + plugin-declared + runtime-added
     all_sources: list[DocSource] = list(BUILTIN_SOURCES)
     for decl in ctx._rag_sources:
         all_sources.append(
@@ -79,6 +79,13 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
                 doc_type=decl.doc_type,
             )
         )
+
+    # Load runtime-added sources (persisted across restarts via sources.json).
+    # Plugin-declared sources take precedence on name conflict.
+    _static_names = {s.name for s in all_sources}
+    for runtime_src in docs_manager.load_runtime_sources():
+        if runtime_src.name not in _static_names:
+            all_sources.append(runtime_src)
 
     # Index sources not yet in the vector store at startup
     if settings.auto_update:
@@ -305,5 +312,110 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
             logger.error("rag_status failed: %s", exc)
             return json.dumps({"error": str(exc)})
 
-    rag_tools = [rag_search, rag_update_docs, rag_index_schema, rag_index_table, rag_status]
+    @ctx.tool(mutates=False)
+    async def rag_ingest(source_name: str | None = None) -> str:
+        """Force a full re-crawl and reindex of one or all documentation sources.
+
+        Ignores SHA change detection and re-fetches every file. Use this when
+        an incremental update missed a change or a full rebuild is needed.
+
+        Args:
+            source_name: Source to reingest (e.g., "deriva-py-docs").
+                If omitted, all sources are reingested.
+        """
+        try:
+            targets = (
+                [s for s in all_sources if s.name == source_name] if source_name else all_sources
+            )
+            if source_name and not targets:
+                return json.dumps({"error": f"Unknown source: {source_name!r}"})
+            counts = {}
+            for src in targets:
+                counts[src.name] = await docs_manager.ingest(src, force=True)
+            return json.dumps({"ingested": counts})
+        except Exception as exc:
+            logger.error("rag_ingest failed: %s", exc)
+            return json.dumps({"error": str(exc)})
+
+    @ctx.tool(mutates=False)
+    async def rag_add_source(
+        name: str,
+        repo_owner: str,
+        repo_name: str,
+        branch: str = "master",
+        path_prefix: str = "docs/",
+        doc_type: str = "user-guide",
+    ) -> str:
+        """Register a new documentation source and immediately index it.
+
+        Persists the source to sources.json so it survives restarts.
+        Sources added via this tool are merged with built-in and plugin-declared
+        sources at startup; plugin-declared sources take precedence on name conflict.
+
+        Args:
+            name: Unique identifier for the source (e.g., "myproject-docs").
+            repo_owner: GitHub org or user (e.g., "my-org").
+            repo_name: Repository name.
+            branch: Branch to crawl (default: "master").
+            path_prefix: Path prefix filter (default: "docs/").
+            doc_type: Document type tag stored in the vector store.
+        """
+        if any(s.name == name for s in all_sources):
+            return json.dumps({"error": f"Source {name!r} already exists"})
+        try:
+            src = DocSource(
+                name=name,
+                owner=repo_owner,
+                repo=repo_name,
+                branch=branch,
+                path_prefix=path_prefix,
+                doc_type=doc_type,
+            )
+            docs_manager.add_source(src)
+            all_sources.append(src)
+            count = await docs_manager.update(src)
+            return json.dumps({
+                "status": "added",
+                "name": name,
+                "chunks_indexed": count,
+            })
+        except Exception as exc:
+            logger.error("rag_add_source failed: %s", exc)
+            return json.dumps({"error": str(exc)})
+
+    @ctx.tool(mutates=False)
+    async def rag_remove_source(name: str) -> str:
+        """Remove a runtime-added documentation source and delete its indexed chunks.
+
+        Only sources added via rag_add_source can be removed. Built-in and
+        plugin-declared sources return an error if removal is attempted.
+
+        Args:
+            name: Source name to remove (e.g., "myproject-docs").
+        """
+        if not docs_manager.is_runtime_source(name):
+            return json.dumps({
+                "error": (
+                    f"Source {name!r} is not a runtime-added source and cannot be removed. "
+                    "Only sources added via rag_add_source can be removed."
+                )
+            })
+        try:
+            # Remove from the in-memory list
+            for i, s in enumerate(all_sources):
+                if s.name == name:
+                    all_sources.pop(i)
+                    break
+            # Delete indexed chunks whose source key starts with "name:"
+            await store.delete_source(name)
+            docs_manager.remove_source(name)
+            return json.dumps({"status": "removed", "name": name})
+        except Exception as exc:
+            logger.error("rag_remove_source failed: %s", exc)
+            return json.dumps({"error": str(exc)})
+
+    rag_tools = [
+        rag_search, rag_update_docs, rag_index_schema, rag_index_table, rag_status,
+        rag_ingest, rag_add_source, rag_remove_source,
+    ]
     logger.info("RAG tools registered: %s", [fn.__name__ for fn in rag_tools])

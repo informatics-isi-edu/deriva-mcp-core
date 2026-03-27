@@ -88,19 +88,25 @@ def mock_catalog():
     schema_resp = MagicMock()
     schema_resp.json.return_value = _SCHEMA_JSON
 
+    entity_resp = MagicMock()
+    entity_resp.json.return_value = [{"RID": "1-AAA", "Name": "foo"}]
+
     def _get(path, **kwargs):
         if path == "/schema":
             return schema_resp
+        if path.startswith("/entity/"):
+            return entity_resp
         resp = MagicMock()
         resp.json.return_value = []
         return resp
 
     catalog.get.side_effect = _get
+    catalog._entity_resp = entity_resp  # expose for assertions in entity tests
     catalog.post.return_value = MagicMock(json=lambda: [{"RID": "1-ABC", "Name": "test"}])
     catalog.put.return_value = MagicMock(json=lambda: [{"RID": "1-ABC", "Name": "updated"}])
     catalog.delete.return_value = MagicMock()
 
-    # Datapath API -- used by entity tools via catalog.getPathBuilder()
+    # Datapath API -- used by vocabulary, insert/update/delete entity tools via catalog.getPathBuilder()
     mock_path = MagicMock()
     mock_path.filter.return_value = mock_path  # chainable
     mock_path.entities.return_value.fetch.return_value = [{"RID": "1-AAA", "Name": "foo"}]
@@ -286,22 +292,44 @@ class TestEntityTools:
             result = json.loads(await tools["get_entities"]("h", "1", "public", "MyTable"))
         assert result["count"] == 1
         assert result["entities"] == [{"RID": "1-AAA", "Name": "foo"}]
-        mock_catalog._mock_path.entities.return_value.fetch.assert_called_once()
+        url = mock_catalog.get.call_args[0][0]
+        assert "public:MyTable" in url
+        assert "@sort(RID)" in url
 
     async def test_get_entities_with_filters(self, ctx, mock_catalog):
         tools = self._register(ctx)
         with self._patch_server(mock_catalog):
             await tools["get_entities"]("h", "1", "public", "MyTable", filters={"Status": "active"})
-        # filter() must be called once per filter key
-        mock_catalog._mock_path.filter.assert_called_once()
+        url = mock_catalog.get.call_args[0][0]
+        assert "/Status=active" in url
+        assert "@sort(RID)" in url
 
     async def test_get_entities_limit_capped(self, ctx, mock_catalog):
         tools = self._register(ctx)
         with self._patch_server(mock_catalog):
             await tools["get_entities"]("h", "1", "public", "MyTable", limit=9999)
-        # fetch must be called with limit capped at 1000
-        _, fetch_kwargs = mock_catalog._mock_path.entities.return_value.fetch.call_args
-        assert fetch_kwargs.get("limit") == 1000
+        url = mock_catalog.get.call_args[0][0]
+        assert "?limit=1000" in url
+
+    async def test_get_entities_after_rid(self, ctx, mock_catalog):
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            await tools["get_entities"]("h", "1", "public", "MyTable", limit=10, after_rid="Q-Y4CM")
+        url = mock_catalog.get.call_args[0][0]
+        assert "@sort(RID)@after(Q-Y4CM)" in url
+        assert "?limit=10" in url
+
+    async def test_get_entities_preflight_count(self, ctx, mock_catalog):
+        mock_catalog.get.side_effect = None
+        mock_catalog.get.return_value.json.return_value = [{"cnt": 42}]
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["get_entities"]("h", "1", "public", "MyTable", preflight_count=True)
+            )
+        assert result["total_count"] == 42
+        assert result["entities_fetched"] is False
+        assert "action_required" in result
 
     async def test_insert_entities(self, ctx, mock_catalog):
         tools = self._register(ctx)
@@ -348,10 +376,8 @@ class TestEntityTools:
         mock_catalog._mock_path.delete.assert_called_once()
 
     async def test_get_entities_not_found_returns_hint(self, ctx, mock_catalog):
-        """Not-found error surfaces RAG suggestions when the store has results."""
-        mock_catalog._mock_path.entities.return_value.fetch.side_effect = KeyError(
-            "MyTable not found in schema"
-        )
+        """Not-found HTTP error surfaces RAG suggestions when the store has results."""
+        mock_catalog.get.side_effect = RuntimeError("404 Not Found: table does not exist")
         suggestions = [{"name": "public:Dataset", "description": "Dataset table", "relevance": 0.9}]
         tools = self._register(ctx)
         with self._patch_server(mock_catalog), patch(
@@ -364,10 +390,8 @@ class TestEntityTools:
         assert result["suggestions"] == suggestions
 
     async def test_get_entities_not_found_no_rag_no_hint(self, ctx, mock_catalog):
-        """Not-found error with no RAG results returns error only -- no hint field."""
-        mock_catalog._mock_path.entities.return_value.fetch.side_effect = KeyError(
-            "table not found"
-        )
+        """Not-found HTTP error with no RAG results returns error only -- no hint field."""
+        mock_catalog.get.side_effect = RuntimeError("404 Not Found: table does not exist")
         tools = self._register(ctx)
         with self._patch_server(mock_catalog), patch(
             "deriva_mcp_core.tools.entity._rag_suggestions", new=AsyncMock(return_value=[])
@@ -377,17 +401,9 @@ class TestEntityTools:
         assert "hint" not in result
         assert "suggestions" not in result
 
-    async def test_get_entities_bare_keyerror_triggers_hint(self, ctx, mock_catalog):
-        """KeyError with a bare table name (from PathBuilder tables[name]) triggers hint.
-
-        This is the real failure mode: pb.schemas[s].tables[t] raises KeyError('sample')
-        when the table does not exist. str(KeyError('sample')) == \"'sample'\" which does
-        not match any text pattern, so isinstance check is required.
-        """
-        mock_pb = mock_catalog.getPathBuilder.return_value
-        mock_pb.schemas.__getitem__.return_value.tables.__getitem__.side_effect = KeyError(
-            "sample"
-        )
+    async def test_get_entities_does_not_exist_triggers_hint(self, ctx, mock_catalog):
+        """'does not exist' HTTP error from ERMrest triggers RAG hint."""
+        mock_catalog.get.side_effect = RuntimeError("relation 'sample' does not exist")
         suggestions = [{"name": "Data:Specimen", "description": "Specimen table", "relevance": 0.8}]
         tools = self._register(ctx)
         with self._patch_server(mock_catalog), patch(
@@ -1762,6 +1778,105 @@ class TestAnnotationTools:
         assert "error" in result
         mock_audit.assert_called_once()
         assert mock_audit.call_args[0][0] == "annotation_set_column_display_failed"
+
+    # -- apply_navbar_annotations --
+
+    async def test_apply_navbar_annotations_basic(self, ctx, mock_catalog, mock_model):
+        _CC = "tag:misd.isi.edu,2015:chaise-config"
+        _DT = "tag:isrd.isi.edu,2015:display"
+        model, _, _ = mock_model
+        model.annotations = {}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.annotation.audit_event"
+        ):
+            result = json.loads(
+                await tools["apply_navbar_annotations"]("h", "1", "My Project", "My Title")
+            )
+        assert result["status"] == "applied"
+        assert model.annotations[_CC]["navbarBrandText"] == "My Project"
+        assert model.annotations[_CC]["headTitle"] == "My Title"
+        assert model.annotations[_CC]["deleteRecord"] is True
+        assert model.annotations[_CC]["systemColumnsDisplayEntry"] == ["RID"]
+        assert model.annotations[_DT] == {"name_style": {"underline_space": True}}
+        assert "navbarMenu" not in model.annotations[_CC]
+
+    async def test_apply_navbar_annotations_default_table(self, ctx, mock_catalog, mock_model):
+        _CC = "tag:misd.isi.edu,2015:chaise-config"
+        model, _, _ = mock_model
+        model.annotations = {}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.annotation.audit_event"
+        ):
+            await tools["apply_navbar_annotations"](
+                "h", "1", default_table={"schema": "isa", "table": "Dataset"}
+            )
+        assert model.annotations[_CC]["defaultTable"] == {"schema": "isa", "table": "Dataset"}
+
+    async def test_apply_navbar_annotations_navbar_menu(self, ctx, mock_catalog, mock_model):
+        _CC = "tag:misd.isi.edu,2015:chaise-config"
+        model, _, _ = mock_model
+        model.annotations = {}
+        mock_catalog.getCatalogModel.return_value = model
+        menu = {"newTab": False, "children": [{"name": "Data", "url": "/chaise/recordset/#1/isa:Dataset"}]}
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.annotation.audit_event"
+        ):
+            await tools["apply_navbar_annotations"]("h", "1", navbar_menu=menu)
+        assert model.annotations[_CC]["navbarMenu"] == menu
+
+    async def test_apply_navbar_annotations_auto_schema_menu(self, ctx, mock_catalog, mock_model):
+        _CC = "tag:misd.isi.edu,2015:chaise-config"
+        model, _, _ = mock_model
+        model.annotations = {}
+        mock_catalog.getCatalogModel.return_value = model
+        mock_catalog.get.side_effect = None
+        mock_catalog.get.return_value.json.return_value = {
+            "schemas": {
+                "public": {"tables": {"ERMrest_Client": {}}},
+                "isa": {"tables": {"Dataset": {}, "Sample": {}}},
+            }
+        }
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.annotation.audit_event"
+        ):
+            await tools["apply_navbar_annotations"]("h", "1", auto_schema_menu=True)
+        menu = model.annotations[_CC]["navbarMenu"]
+        assert menu["newTab"] is False
+        assert len(menu["children"]) == 1  # public excluded
+        assert menu["children"][0]["name"] == "isa"
+        table_names = [c["name"] for c in menu["children"][0]["children"]]
+        assert table_names == ["Dataset", "Sample"]
+
+    async def test_apply_navbar_annotations_no_system_columns(self, ctx, mock_catalog, mock_model):
+        _CC = "tag:misd.isi.edu,2015:chaise-config"
+        model, _, _ = mock_model
+        model.annotations = {}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.annotation.audit_event"
+        ):
+            await tools["apply_navbar_annotations"]("h", "1", show_system_columns=False)
+        assert "systemColumnsDisplayEntry" not in model.annotations[_CC]
+
+    async def test_apply_navbar_annotations_error_emits_audit(self, ctx, mock_catalog):
+        mock_catalog.getCatalogModel.side_effect = RuntimeError("ERMrest error")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.annotation.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["apply_navbar_annotations"]("h", "1")
+            )
+        assert "error" in result
+        mock_audit.assert_called_once()
+        assert mock_audit.call_args[0][0] == "annotation_apply_navbar_failed"
 
 
 # ---------------------------------------------------------------------------

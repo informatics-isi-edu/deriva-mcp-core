@@ -143,6 +143,71 @@ class RAGDocsManager:
         return await self.ingest(source, force=False)
 
     # ------------------------------------------------------------------
+    # Runtime source persistence
+    # ------------------------------------------------------------------
+
+    def _runtime_sources_path(self) -> Path:
+        return self._data_dir / "sources.json"
+
+    def load_runtime_sources(self) -> list[DocSource]:
+        """Return the list of runtime-added sources from sources.json."""
+        path = self._runtime_sources_path()
+        if not path.exists():
+            return []
+        try:
+            entries = json.loads(path.read_text(encoding="utf-8"))
+            return [DocSource(**e) for e in entries]
+        except Exception:
+            logger.warning("Failed to load runtime sources from %s", path, exc_info=True)
+            return []
+
+    def _save_runtime_sources(self, sources: list[DocSource]) -> None:
+        path = self._runtime_sources_path()
+        tmp = path.with_suffix(".tmp")
+        try:
+            tmp.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": s.name,
+                            "owner": s.owner,
+                            "repo": s.repo,
+                            "branch": s.branch,
+                            "path_prefix": s.path_prefix,
+                            "doc_type": s.doc_type,
+                        }
+                        for s in sources
+                    ],
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            tmp.replace(path)
+        except Exception:
+            logger.warning("Failed to save runtime sources to %s", path, exc_info=True)
+
+    def add_source(self, source: DocSource) -> None:
+        """Add a runtime source and persist to sources.json.
+
+        If a source with the same name already exists it is replaced.
+        """
+        existing = [s for s in self.load_runtime_sources() if s.name != source.name]
+        self._save_runtime_sources(existing + [source])
+
+    def remove_source(self, name: str) -> None:
+        """Remove a runtime source from sources.json.
+
+        Does not touch the vector store; callers must delete indexed chunks
+        separately if needed.
+        """
+        updated = [s for s in self.load_runtime_sources() if s.name != name]
+        self._save_runtime_sources(updated)
+
+    def is_runtime_source(self, name: str) -> bool:
+        """Return True if name is in the runtime sources list."""
+        return any(s.name == name for s in self.load_runtime_sources())
+
+    # ------------------------------------------------------------------
     # SHA cache persistence
     # ------------------------------------------------------------------
 

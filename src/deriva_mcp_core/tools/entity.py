@@ -165,36 +165,106 @@ def register(ctx: PluginContext) -> None:
         table: str,
         filters: dict[str, Any] | None = None,
         limit: int = 100,
+        after_rid: str | None = None,
+        preflight_count: bool = False,
     ) -> str:
         """Retrieve entities from a DERIVA table.
 
-        Returns up to `limit` rows from the given table. Use `filters` for
-        simple column-equality filtering. For complex queries (path traversal,
-        aggregates, projections), use query_attribute or query_aggregate.
+        Returns up to `limit` rows sorted by RID. Use `filters` for simple
+        column-equality filtering. Use `after_rid` for cursor-based pagination.
+
+        IMPORTANT -- PREFLIGHT COUNT RULE: When the row count of the target
+        table is not already known from a prior count_table or get_entities
+        preflight call in this session, you MUST call get_entities with
+        preflight_count=True before fetching any rows. This is mandatory
+        whenever the user asks to retrieve "all" records, an unfiltered table,
+        or any table whose size has not been established.
+
+        When preflight_count=True the tool ONLY returns the row count -- it
+        never fetches entities regardless of the limit parameter. Present the
+        count to the user and ask whether to proceed and with what limit before
+        calling get_entities again with preflight_count=False (the default) to
+        actually retrieve rows. Do NOT pass a large limit on the preflight call;
+        it is ignored for fetching purposes.
+
+        The preflight flag is False by default so repeat calls (where the count
+        is already known) do not pay the extra round-trip.
+
+        Cursor-based pagination:
+            Rows are always returned sorted by RID. To retrieve subsequent pages,
+            set after_rid to the RID of the last row from the previous page.
+            Stop when count < limit.
+
+                Page 1: get_entities(schema, table, limit=50)
+                Page 2: get_entities(schema, table, limit=50, after_rid="LAST_RID")
+                Page 3: get_entities(schema, table, limit=50, after_rid="LAST_RID")
+
+        For other access patterns use the appropriate tool:
+            - Column projection (select specific columns): query_attribute
+            - Path traversal across joined tables: query_attribute
+            - Aggregate functions (count, avg, max): query_aggregate
+            - Row count with optional filters: count_table
+            - Single record by RID: use filters={"RID": rid}
 
         Args:
             hostname: Hostname of the DERIVA server.
-            catalog_id: Catalog ID or alias.
+            catalog_id: Catalog ID, alias, or compound ID@snaptime for historical
+                snapshot access (e.g. "1@2TA-YA2D-ZDWY"). The snaptime must be a
+                Crockford base32 string -- never a plain date. Call resolve_snaptime
+                first to convert a human-readable date to a snaptime.
             schema: Schema name (e.g. "public" or "isa").
             table: Table name.
             filters: Optional column equality filters {column: value}.
             limit: Maximum entities to return (default 100, max 1000).
+            after_rid: When set, returns rows whose RID sorts after this value.
+                Set to the RID of the last row from the previous page to advance
+                the cursor. Omit on the first page.
+            preflight_count: If True, return only the row count without fetching
+                entities. Present the count to the user, confirm the limit, then
+                call again with preflight_count=False to actually retrieve rows.
+                Default False.
         """
         try:
+            effective_limit = min(limit, 1000)
             with deriva_call():
                 catalog = get_catalog(hostname, catalog_id)
-                pb = catalog.getPathBuilder()
-                path = pb.schemas[schema].tables[table]
+
+                filter_seg = ""
                 if filters:
-                    for col, val in filters.items():
-                        path = path.filter(getattr(path, col) == val)
-                entities = list(path.entities().fetch(limit=min(limit, 1000)))
-                return json.dumps({
-                    "schema": schema,
-                    "table": table,
-                    "count": len(entities),
-                    "entities": entities,
-                })
+                    filter_seg = "".join(f"/{k}={v}" for k, v in filters.items())
+
+                if preflight_count:
+                    # Count only -- never fetch entities on a preflight call.
+                    count_result = catalog.get(
+                        f"/aggregate/{schema}:{table}{filter_seg}/cnt:=cnt(RID)"
+                    ).json()
+                    total_count: int = count_result[0]["cnt"] if count_result else 0
+                    return json.dumps({
+                        "schema": schema,
+                        "table": table,
+                        "total_count": total_count,
+                        "entities_fetched": False,
+                        "action_required": (
+                            f"Found {total_count} rows. Present this count to the user "
+                            f"and ask what limit to use before calling get_entities "
+                            f"again with preflight_count=False. Use after_rid (the last "
+                            f"RID of each page) to paginate through large result sets."
+                        ),
+                    })
+
+                after_seg = f"@after({after_rid})" if after_rid is not None else ""
+                url = (
+                    f"/entity/{schema}:{table}{filter_seg}"
+                    f"@sort(RID){after_seg}?limit={effective_limit}"
+                )
+                entities = catalog.get(url).json()
+
+            return json.dumps({
+                "schema": schema,
+                "table": table,
+                "count": len(entities),
+                "entities": entities,
+            })
         except Exception as exc:
             return json.dumps(await _entity_error(exc, hostname, catalog_id, schema, table, "get_entities"))
 

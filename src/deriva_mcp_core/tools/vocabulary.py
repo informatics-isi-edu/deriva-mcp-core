@@ -20,8 +20,11 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from deriva.core.ermrest_model import Column, Key, Table, builtin_types
+
 from . import fmt_exc
 from ..context import deriva_call, get_catalog
+from ..plugin.api import fire_schema_change
 from ..telemetry import audit_event
 
 if TYPE_CHECKING:
@@ -56,7 +59,9 @@ def register(ctx: PluginContext) -> None:
 
         Args:
             hostname: Hostname of the DERIVA server.
-            catalog_id: Catalog ID or alias.
+            catalog_id: Catalog ID, alias, or compound ID@snaptime for historical
+                snapshot access. The snaptime must be a Crockford base32 string --
+                never a plain date. Call resolve_snaptime first to convert a date.
             schema: Schema name containing the vocabulary table.
             table: Vocabulary table name (e.g., "Dataset_Type", "Tissue").
         """
@@ -91,7 +96,9 @@ def register(ctx: PluginContext) -> None:
 
         Args:
             hostname: Hostname of the DERIVA server.
-            catalog_id: Catalog ID or alias.
+            catalog_id: Catalog ID, alias, or compound ID@snaptime for historical
+                snapshot access. The snaptime must be a Crockford base32 string --
+                never a plain date. Call resolve_snaptime first to convert a date.
             schema: Schema name containing the vocabulary table.
             table: Vocabulary table name.
             name: Primary name or synonym to search for.
@@ -314,6 +321,277 @@ def register(ctx: PluginContext) -> None:
                 schema=schema,
                 table=table,
                 term_name=name,
+                error_type=type(exc).__name__,
+            )
+            return json.dumps({"error": fmt_exc(exc)})
+
+    @ctx.tool(mutates=True)
+    async def create_vocabulary(
+        hostname: str,
+        catalog_id: str,
+        schema: str,
+        vocabulary_name: str,
+        comment: str = "",
+    ) -> str:
+        """Create a new vocabulary table in the specified schema.
+
+        Creates a table with the standard DERIVA vocabulary column set:
+        Name (text, unique), URI (text, unique), Synonyms (json),
+        Description (markdown), ID (text, unique). System columns
+        (RID, RCT, RCB, RMT, RMB) are added automatically by ERMrest.
+
+        Args:
+            hostname: Hostname of the DERIVA server.
+            catalog_id: Catalog ID or alias.
+            schema: Schema name in which to create the vocabulary table.
+            vocabulary_name: Name for the new vocabulary table.
+            comment: Optional human-readable description of the vocabulary.
+        """
+        table_def = Table.define(
+            vocabulary_name,
+            column_defs=[
+                Column.define(_NAME, builtin_types.text, nullok=False,
+                              comment="Primary display name of the term"),
+                Column.define(_URI, builtin_types.text, nullok=False,
+                              comment="Unique URI identifier for the term"),
+                Column.define(_SYNONYMS, builtin_types.json, nullok=True,
+                              comment="Alternative names for the term"),
+                Column.define(_DESCRIPTION, builtin_types.markdown, nullok=True,
+                              comment="Human-readable description of the term"),
+                Column.define(_ID, builtin_types.text, nullok=False,
+                              comment="Short text identifier for the term"),
+            ],
+            key_defs=[
+                Key.define([_NAME]),
+                Key.define([_URI]),
+                Key.define([_ID]),
+            ],
+            comment=comment,
+        )
+        try:
+            with deriva_call():
+                catalog = get_catalog(hostname, catalog_id)
+                model = catalog.getCatalogModel()
+                new_table = model.schemas[schema].create_table(table_def)
+            fire_schema_change(hostname, catalog_id)
+            audit_event(
+                "vocabulary_create_vocabulary",
+                hostname=hostname,
+                catalog_id=catalog_id,
+                schema=schema,
+                vocabulary_name=vocabulary_name,
+            )
+            return json.dumps({
+                "status": "created",
+                "schema": schema,
+                "vocabulary_name": new_table.name,
+                "columns": [c.name for c in new_table.columns],
+            })
+        except Exception as exc:
+            logger.error("create_vocabulary failed: %s", exc)
+            audit_event(
+                "vocabulary_create_vocabulary_failed",
+                hostname=hostname,
+                catalog_id=catalog_id,
+                schema=schema,
+                vocabulary_name=vocabulary_name,
+                error_type=type(exc).__name__,
+            )
+            return json.dumps({"error": fmt_exc(exc)})
+
+    @ctx.tool(mutates=True)
+    async def add_synonym(
+        hostname: str,
+        catalog_id: str,
+        schema: str,
+        table: str,
+        term_name: str,
+        synonym: str,
+    ) -> str:
+        """Add a single synonym to an existing vocabulary term.
+
+        Reads the current Synonyms array, appends the new synonym if it is
+        not already present, and writes back. Use lookup_term first to
+        verify the term exists.
+
+        Args:
+            hostname: Hostname of the DERIVA server.
+            catalog_id: Catalog ID or alias.
+            schema: Schema name containing the vocabulary table.
+            table: Vocabulary table name.
+            term_name: Primary Name of the term to update.
+            synonym: Synonym string to add.
+        """
+        try:
+            with deriva_call():
+                catalog = get_catalog(hostname, catalog_id)
+                pb = catalog.getPathBuilder()
+                path = pb.schemas[schema].tables[table]
+                rows = list(path.filter(path.Name == term_name).entities().fetch(limit=1))
+                if not rows:
+                    return json.dumps({"error": f"Term {term_name!r} not found in {schema}:{table}"})
+                row = rows[0]
+                synonyms = row.get(_SYNONYMS) or []
+                if isinstance(synonyms, str):
+                    try:
+                        synonyms = json.loads(synonyms)
+                    except Exception:
+                        synonyms = []
+                if synonym not in synonyms:
+                    synonyms = list(synonyms) + [synonym]
+                    list(path.update([{"RID": row["RID"], _SYNONYMS: synonyms}]))
+            audit_event(
+                "vocabulary_add_synonym",
+                hostname=hostname,
+                catalog_id=catalog_id,
+                schema=schema,
+                table=table,
+                term_name=term_name,
+            )
+            return json.dumps({
+                "status": "updated",
+                "schema": schema,
+                "table": table,
+                "term_name": term_name,
+                "synonyms": synonyms,
+            })
+        except Exception as exc:
+            logger.error("add_synonym failed: %s", exc)
+            audit_event(
+                "vocabulary_add_synonym_failed",
+                hostname=hostname,
+                catalog_id=catalog_id,
+                schema=schema,
+                table=table,
+                term_name=term_name,
+                error_type=type(exc).__name__,
+            )
+            return json.dumps({"error": fmt_exc(exc)})
+
+    @ctx.tool(mutates=True)
+    async def remove_synonym(
+        hostname: str,
+        catalog_id: str,
+        schema: str,
+        table: str,
+        term_name: str,
+        synonym: str,
+    ) -> str:
+        """Remove a single synonym from an existing vocabulary term.
+
+        Reads the current Synonyms array, removes the specified synonym if
+        present, and writes back. No error if the synonym is not in the list.
+
+        Args:
+            hostname: Hostname of the DERIVA server.
+            catalog_id: Catalog ID or alias.
+            schema: Schema name containing the vocabulary table.
+            table: Vocabulary table name.
+            term_name: Primary Name of the term to update.
+            synonym: Synonym string to remove.
+        """
+        try:
+            with deriva_call():
+                catalog = get_catalog(hostname, catalog_id)
+                pb = catalog.getPathBuilder()
+                path = pb.schemas[schema].tables[table]
+                rows = list(path.filter(path.Name == term_name).entities().fetch(limit=1))
+                if not rows:
+                    return json.dumps({"error": f"Term {term_name!r} not found in {schema}:{table}"})
+                row = rows[0]
+                synonyms = row.get(_SYNONYMS) or []
+                if isinstance(synonyms, str):
+                    try:
+                        synonyms = json.loads(synonyms)
+                    except Exception:
+                        synonyms = []
+                synonyms = [s for s in synonyms if s != synonym]
+                list(path.update([{"RID": row["RID"], _SYNONYMS: synonyms}]))
+            audit_event(
+                "vocabulary_remove_synonym",
+                hostname=hostname,
+                catalog_id=catalog_id,
+                schema=schema,
+                table=table,
+                term_name=term_name,
+            )
+            return json.dumps({
+                "status": "updated",
+                "schema": schema,
+                "table": table,
+                "term_name": term_name,
+                "synonyms": synonyms,
+            })
+        except Exception as exc:
+            logger.error("remove_synonym failed: %s", exc)
+            audit_event(
+                "vocabulary_remove_synonym_failed",
+                hostname=hostname,
+                catalog_id=catalog_id,
+                schema=schema,
+                table=table,
+                term_name=term_name,
+                error_type=type(exc).__name__,
+            )
+            return json.dumps({"error": fmt_exc(exc)})
+
+    @ctx.tool(mutates=True)
+    async def update_term_description(
+        hostname: str,
+        catalog_id: str,
+        schema: str,
+        table: str,
+        term_name: str,
+        description: str,
+    ) -> str:
+        """Update the description of a vocabulary term.
+
+        Targeted description-only update. More discoverable than update_term
+        for this common case -- the caller does not need to know about
+        the Synonyms field.
+
+        Args:
+            hostname: Hostname of the DERIVA server.
+            catalog_id: Catalog ID or alias.
+            schema: Schema name containing the vocabulary table.
+            table: Vocabulary table name.
+            term_name: Primary Name of the term to update.
+            description: New human-readable description.
+        """
+        try:
+            with deriva_call():
+                catalog = get_catalog(hostname, catalog_id)
+                pb = catalog.getPathBuilder()
+                path = pb.schemas[schema].tables[table]
+                rows = list(path.filter(path.Name == term_name).entities().fetch(limit=1))
+                if not rows:
+                    return json.dumps({"error": f"Term {term_name!r} not found in {schema}:{table}"})
+                rid = rows[0]["RID"]
+                updated = list(path.update([{"RID": rid, _DESCRIPTION: description}]))
+                term = updated[0] if updated else {}
+            audit_event(
+                "vocabulary_update_term_description",
+                hostname=hostname,
+                catalog_id=catalog_id,
+                schema=schema,
+                table=table,
+                term_name=term_name,
+            )
+            return json.dumps({
+                "status": "updated",
+                "schema": schema,
+                "table": table,
+                "term": term,
+            })
+        except Exception as exc:
+            logger.error("update_term_description failed: %s", exc)
+            audit_event(
+                "vocabulary_update_term_description_failed",
+                hostname=hostname,
+                catalog_id=catalog_id,
+                schema=schema,
+                table=table,
+                term_name=term_name,
                 error_type=type(exc).__name__,
             )
             return json.dumps({"error": fmt_exc(exc)})

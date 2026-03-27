@@ -12,18 +12,26 @@ Read tools (mutates=False):
     get_handlebars_template_variables -- available template variables for a table
 
 Write tools (mutates=True) -- each call applies immediately, no staging:
-    set_display_annotation      -- full display annotation on a table or column
-    set_table_display_name      -- convenience: sets {"name": ...} in display annotation
-    set_row_name_pattern        -- convenience: sets row_name in table-display annotation
-    set_column_display_name     -- convenience: sets {"name": ...} in column display annotation
-    set_visible_columns         -- full visible-columns annotation replacement
-    add_visible_column          -- splice one column into visible-columns for a context
-    remove_visible_column       -- remove one column from visible-columns for a context
-    set_visible_foreign_keys    -- full visible-foreign-keys annotation replacement
-    add_visible_foreign_key     -- splice one FK into visible-foreign-keys for a context
-    remove_visible_foreign_key  -- remove one FK from visible-foreign-keys for a context
-    set_table_display           -- full table-display annotation replacement
-    set_column_display          -- full column-display annotation replacement
+    apply_navbar_annotations        -- set chaise-config and display at catalog level
+    set_display_annotation          -- full display annotation on a table or column
+    set_table_display_name          -- convenience: sets {"name": ...} in display annotation
+    set_row_name_pattern            -- convenience: sets row_name in table-display annotation
+    set_column_display_name         -- convenience: sets {"name": ...} in column display annotation
+    set_visible_columns             -- full visible-columns annotation replacement
+    add_visible_column              -- splice one column into visible-columns for a context
+    remove_visible_column           -- remove one column from visible-columns for a context
+    set_visible_foreign_keys        -- full visible-foreign-keys annotation replacement
+    add_visible_foreign_key         -- splice one FK into visible-foreign-keys for a context
+    remove_visible_foreign_key      -- remove one FK from visible-foreign-keys for a context
+    set_table_display               -- full table-display annotation replacement
+    set_column_display              -- full column-display annotation replacement
+    reorder_visible_columns         -- reorder visible-columns list for a context
+    reorder_visible_foreign_keys    -- reorder visible-foreign-keys list for a context
+
+Read tools (mutates=False, continued):
+    get_table_sample_data           -- fetch a few rows for Handlebars template testing
+    preview_handlebars_template     -- render a Handlebars template with provided data
+    validate_template_syntax        -- validate Handlebars template syntax
 
 Write tools differ from the deriva-mcp prototype in one key way: changes are applied
 immediately to ERMrest on each call. There is no staged model and no separate
@@ -45,6 +53,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _DISPLAY = "tag:isrd.isi.edu,2015:display"
+_CHAISE_CONFIG = "tag:misd.isi.edu,2015:chaise-config"
 _VISIBLE_COLUMNS = "tag:isrd.isi.edu,2016:visible-columns"
 _VISIBLE_FOREIGN_KEYS = "tag:isrd.isi.edu,2016:visible-foreign-keys"
 _TABLE_DISPLAY = "tag:isrd.isi.edu,2016:table-display"
@@ -74,7 +83,9 @@ def register(ctx: PluginContext) -> None:
 
         Args:
             hostname: Hostname of the DERIVA server.
-            catalog_id: Catalog ID or alias.
+            catalog_id: Catalog ID, alias, or compound ID@snaptime for historical
+                snapshot access. The snaptime must be a Crockford base32 string --
+                never a plain date. Call resolve_snaptime first to convert a date.
             schema: Schema name.
             table: Table name.
         """
@@ -110,7 +121,9 @@ def register(ctx: PluginContext) -> None:
 
         Args:
             hostname: Hostname of the DERIVA server.
-            catalog_id: Catalog ID or alias.
+            catalog_id: Catalog ID, alias, or compound ID@snaptime for historical
+                snapshot access. The snaptime must be a Crockford base32 string --
+                never a plain date. Call resolve_snaptime first to convert a date.
             schema: Schema name.
             table: Table name.
             column: Column name.
@@ -150,7 +163,9 @@ def register(ctx: PluginContext) -> None:
 
         Args:
             hostname: Hostname of the DERIVA server.
-            catalog_id: Catalog ID or alias.
+            catalog_id: Catalog ID, alias, or compound ID@snaptime for historical
+                snapshot access. The snaptime must be a Crockford base32 string --
+                never a plain date. Call resolve_snaptime first to convert a date.
             schema: Schema name.
             table: Table name.
         """
@@ -206,7 +221,9 @@ def register(ctx: PluginContext) -> None:
 
         Args:
             hostname: Hostname of the DERIVA server.
-            catalog_id: Catalog ID or alias.
+            catalog_id: Catalog ID, alias, or compound ID@snaptime for historical
+                snapshot access. The snaptime must be a Crockford base32 string --
+                never a plain date. Call resolve_snaptime first to convert a date.
             schema: Schema name.
             table: Table name.
         """
@@ -1095,3 +1112,342 @@ def register(ctx: PluginContext) -> None:
                 error_type=type(exc).__name__,
             )
             return json.dumps({"error": fmt_exc(exc)})
+
+    # ------------------------------------------------------------------
+    # Reorder tools (mutates=True)
+    # ------------------------------------------------------------------
+
+    @ctx.tool(mutates=True)
+    async def reorder_visible_columns(
+        hostname: str,
+        catalog_id: str,
+        schema: str,
+        table: str,
+        context: str,
+        new_order: list,
+    ) -> str:
+        """Reorder the visible-columns list for one context.
+
+        When all elements of new_order are integers they are treated as
+        zero-based indices into the current list, producing a reordered copy.
+        Otherwise new_order is written directly as the replacement list.
+
+        Args:
+            hostname: Hostname of the DERIVA server.
+            catalog_id: Catalog ID or alias.
+            schema: Schema name.
+            table: Table name.
+            context: Annotation context to modify, e.g. "compact", "detailed".
+            new_order: Integer index permutation OR direct replacement list.
+        """
+        try:
+            with deriva_call():
+                catalog = get_catalog(hostname, catalog_id)
+                model = catalog.getCatalogModel()
+                tbl = model.schemas[schema].tables[table]
+                visible = dict(tbl.annotations.get(_VISIBLE_COLUMNS) or {})
+                current = list(visible.get(context) or [])
+                if new_order and all(isinstance(x, int) for x in new_order):
+                    ordered = [current[i] for i in new_order if 0 <= i < len(current)]
+                else:
+                    ordered = list(new_order)
+                visible[context] = ordered
+                tbl.annotations[_VISIBLE_COLUMNS] = visible
+                model.apply()
+            fire_schema_change(hostname, catalog_id)
+            audit_event(
+                "annotation_reorder_visible_columns",
+                hostname=hostname,
+                catalog_id=catalog_id,
+                schema=schema,
+                table=table,
+                context=context,
+            )
+            return json.dumps({
+                "status": "applied",
+                "table": table,
+                "context": context,
+                "updated_list": ordered,
+            })
+        except Exception as exc:
+            logger.error("reorder_visible_columns failed: %s", exc)
+            audit_event(
+                "annotation_reorder_visible_columns_failed",
+                hostname=hostname,
+                catalog_id=catalog_id,
+                schema=schema,
+                table=table,
+                context=context,
+                error_type=type(exc).__name__,
+            )
+            return json.dumps({"error": fmt_exc(exc)})
+
+    @ctx.tool(mutates=True)
+    async def reorder_visible_foreign_keys(
+        hostname: str,
+        catalog_id: str,
+        schema: str,
+        table: str,
+        context: str,
+        new_order: list,
+    ) -> str:
+        """Reorder the visible-foreign-keys list for one context.
+
+        When all elements of new_order are integers they are treated as
+        zero-based indices into the current list, producing a reordered copy.
+        Otherwise new_order is written directly as the replacement list.
+
+        Args:
+            hostname: Hostname of the DERIVA server.
+            catalog_id: Catalog ID or alias.
+            schema: Schema name.
+            table: Table name.
+            context: Annotation context to modify, e.g. "detailed", "*".
+            new_order: Integer index permutation OR direct replacement list.
+        """
+        try:
+            with deriva_call():
+                catalog = get_catalog(hostname, catalog_id)
+                model = catalog.getCatalogModel()
+                tbl = model.schemas[schema].tables[table]
+                visible = dict(tbl.annotations.get(_VISIBLE_FOREIGN_KEYS) or {})
+                current = list(visible.get(context) or [])
+                if new_order and all(isinstance(x, int) for x in new_order):
+                    ordered = [current[i] for i in new_order if 0 <= i < len(current)]
+                else:
+                    ordered = list(new_order)
+                visible[context] = ordered
+                tbl.annotations[_VISIBLE_FOREIGN_KEYS] = visible
+                model.apply()
+            fire_schema_change(hostname, catalog_id)
+            audit_event(
+                "annotation_reorder_visible_foreign_keys",
+                hostname=hostname,
+                catalog_id=catalog_id,
+                schema=schema,
+                table=table,
+                context=context,
+            )
+            return json.dumps({
+                "status": "applied",
+                "table": table,
+                "context": context,
+                "updated_list": ordered,
+            })
+        except Exception as exc:
+            logger.error("reorder_visible_foreign_keys failed: %s", exc)
+            audit_event(
+                "annotation_reorder_visible_foreign_keys_failed",
+                hostname=hostname,
+                catalog_id=catalog_id,
+                schema=schema,
+                table=table,
+                context=context,
+                error_type=type(exc).__name__,
+            )
+            return json.dumps({"error": fmt_exc(exc)})
+
+    @ctx.tool(mutates=True)
+    async def apply_navbar_annotations(
+        hostname: str,
+        catalog_id: str,
+        navbar_brand_text: str = "DERIVA Data Browser",
+        head_title: str = "DERIVA Catalog",
+        default_table: dict | None = None,
+        navbar_menu: dict | None = None,
+        auto_schema_menu: bool = False,
+        show_system_columns: bool = True,
+    ) -> str:
+        """Apply Chaise web interface annotations at the catalog level.
+
+        Sets the chaise-config and display annotations on the catalog object,
+        controlling how the Chaise data browser presents the catalog: navbar
+        brand text, browser tab title, default landing table, system column
+        visibility, and an optional navigation bar menu.
+
+        Standard settings applied on every call:
+            - display: underline_space -- underscores in names rendered as spaces
+            - deleteRecord: true
+            - showFaceting: true
+            - shareCiteAcls: true
+            - exportConfigsSubmenu: accessible to all users (show and enable = ["*"])
+
+        Navbar menu options (mutually exclusive; navbar_menu takes precedence):
+            - navbar_menu: supply a complete navbarMenu dict (passed through as-is)
+            - auto_schema_menu: True generates a simple menu from the live schema --
+              one submenu per non-public schema with all tables listed alphabetically.
+              Useful for quick generic catalog setup without a hand-crafted menu.
+
+        Args:
+            hostname: Hostname of the DERIVA server.
+            catalog_id: Catalog ID or alias.
+            navbar_brand_text: Text shown in the Chaise navbar brand area.
+            head_title: Browser tab title.
+            default_table: Optional dict with "schema" and "table" keys identifying
+                the table Chaise opens by default, e.g. {"schema": "isa", "table": "Dataset"}.
+                If omitted, Chaise uses its own built-in default.
+            navbar_menu: Full custom navbarMenu dict, e.g.:
+                {"newTab": false, "children": [{"name": "Data", "children": [...]}]}
+                If provided, auto_schema_menu is ignored.
+            auto_schema_menu: If True and navbar_menu is None, builds a simple navbar
+                menu from the live catalog schema. Excludes the "public" system schema.
+            show_system_columns: If True (default), adds RID to
+                systemColumnsDisplayEntry and systemColumnsDisplayCompact so the
+                RID column is visible in record and compact views.
+        """
+        try:
+            with deriva_call():
+                catalog = get_catalog(hostname, catalog_id)
+                model = catalog.getCatalogModel()
+
+                resolved_menu: dict | None = navbar_menu
+                if resolved_menu is None and auto_schema_menu:
+                    schema_json = catalog.get("/schema").json()
+                    menu_children = []
+                    for sname, sdata in sorted(schema_json.get("schemas", {}).items()):
+                        if sname == "public":
+                            continue
+                        tables = sorted(sdata.get("tables", {}).keys())
+                        if not tables:
+                            continue
+                        menu_children.append({
+                            "name": sname,
+                            "children": [
+                                {
+                                    "name": tname,
+                                    "url": f"/chaise/recordset/#{catalog_id}/{sname}:{tname}",
+                                }
+                                for tname in tables
+                            ],
+                        })
+                    if menu_children:
+                        resolved_menu = {"newTab": False, "children": menu_children}
+
+                chaise_config: dict[str, Any] = {
+                    "headTitle": head_title,
+                    "navbarBrandText": navbar_brand_text,
+                    "deleteRecord": True,
+                    "showFaceting": True,
+                    "shareCiteAcls": True,
+                    "exportConfigsSubmenu": {"acls": {"show": ["*"], "enable": ["*"]}},
+                }
+                if show_system_columns:
+                    chaise_config["systemColumnsDisplayEntry"] = ["RID"]
+                    chaise_config["systemColumnsDisplayCompact"] = ["RID"]
+                if default_table is not None:
+                    chaise_config["defaultTable"] = default_table
+                if resolved_menu is not None:
+                    chaise_config["navbarMenu"] = resolved_menu
+
+                model.annotations[_CHAISE_CONFIG] = chaise_config
+                model.annotations[_DISPLAY] = {"name_style": {"underline_space": True}}
+                model.apply()
+
+            fire_schema_change(hostname, catalog_id)
+            audit_event(
+                "annotation_apply_navbar",
+                hostname=hostname,
+                catalog_id=catalog_id,
+            )
+            return json.dumps({
+                "status": "applied",
+                "navbar_brand_text": navbar_brand_text,
+                "head_title": head_title,
+            })
+        except Exception as exc:
+            logger.error("apply_navbar_annotations failed: %s", exc)
+            audit_event(
+                "annotation_apply_navbar_failed",
+                hostname=hostname,
+                catalog_id=catalog_id,
+                error_type=type(exc).__name__,
+            )
+            return json.dumps({"error": fmt_exc(exc)})
+
+    # ------------------------------------------------------------------
+    # Sample data and template tools (mutates=False)
+    # ------------------------------------------------------------------
+
+    @ctx.tool(mutates=False)
+    async def get_table_sample_data(
+        hostname: str,
+        catalog_id: str,
+        schema: str,
+        table: str,
+        limit: int = 3,
+    ) -> str:
+        """Fetch a small sample of rows from a table for Handlebars template testing.
+
+        Returns rows as a list of dicts with all columns. Use these rows as
+        the data argument to preview_handlebars_template to see how a template
+        renders against real catalog data.
+
+        Args:
+            hostname: Hostname of the DERIVA server.
+            catalog_id: Catalog ID, alias, or compound ID@snaptime for historical
+                snapshot access. The snaptime must be a Crockford base32 string --
+                never a plain date. Call resolve_snaptime first to convert a date.
+            schema: Schema name.
+            table: Table name.
+            limit: Number of rows to return (default 3, max 10).
+        """
+        effective_limit = min(max(1, limit), 10)
+        try:
+            with deriva_call():
+                catalog = get_catalog(hostname, catalog_id)
+                rows = catalog.get(
+                    f"/entity/{schema}:{table}?limit={effective_limit}"
+                ).json()
+            return json.dumps({
+                "schema": schema,
+                "table": table,
+                "count": len(rows),
+                "rows": rows,
+            })
+        except Exception as exc:
+            logger.error("get_table_sample_data failed: %s", exc)
+            return json.dumps({"error": fmt_exc(exc)})
+
+    @ctx.tool(mutates=False)
+    async def preview_handlebars_template(
+        template: str,
+        data: dict[str, Any],
+    ) -> str:
+        """Render a Handlebars template string with the provided data dict.
+
+        Use get_table_sample_data to obtain a real catalog row as the data
+        argument. The rendered string is returned as "rendered" in the response.
+
+        Args:
+            template: Handlebars template string, e.g. "{{{Name}}} ({{{RID}}})".
+            data: Variable bindings for the template.
+        """
+        try:
+            import chevron
+            rendered = chevron.render(template, data)
+            return json.dumps({"rendered": rendered})
+        except ImportError:
+            return json.dumps({"error": "chevron is not installed; add it to the server dependencies"})
+        except Exception as exc:
+            logger.error("preview_handlebars_template failed: %s", exc)
+            return json.dumps({"error": fmt_exc(exc)})
+
+    @ctx.tool(mutates=False)
+    async def validate_template_syntax(template: str) -> str:
+        """Validate Handlebars template syntax for common errors.
+
+        Attempts to render the template with an empty data context and
+        checks for parse or render errors (unmatched braces, unclosed
+        blocks, etc.). Returns {"valid": true} or {"valid": false, "errors": [...]}.
+
+        Args:
+            template: Handlebars template string to validate.
+        """
+        try:
+            import chevron
+            chevron.render(template, {})
+            return json.dumps({"valid": True})
+        except ImportError:
+            return json.dumps({"error": "chevron is not installed; add it to the server dependencies"})
+        except Exception as exc:
+            return json.dumps({"valid": False, "errors": [str(exc)]})

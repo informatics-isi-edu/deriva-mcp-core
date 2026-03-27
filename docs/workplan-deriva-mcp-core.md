@@ -387,7 +387,7 @@ deriva-mcp-core/
         │       └── logger.py    # Structured JSON audit log (python-json-logger); syslog or rotating file
         └── tools/               # Built-in DERIVA tools (each has register(ctx))
             ├── __init__.py
-            ├── catalog.py       # Schema introspection
+            ├── catalog.py       # Schema introspection + catalog admin (create/delete/alias/cite)
             ├── entity.py        # Entity CRUD (get, post, put, delete)
             ├── query.py         # Attribute and aggregate queries
             └── hatrac.py        # Hatrac object store
@@ -1040,12 +1040,21 @@ Post-5.5 improvements also completed (2026-03-24):
 
 #### 5.5.1 Datapath API Assessment Summary
 
-| Module       | API Strategy                              | Status                                                                 |
-|--------------|-------------------------------------------|------------------------------------------------------------------------|
-| `entity.py`  | Datapath: `getPathBuilder()` + `path.*`   | Done                                                                   |
-| `catalog.py` | Raw HTTP: `catalog.get("/schema")`        | Appropriate; no datapath equivalent for schema introspection           |
-| `query.py`   | Raw HTTP: caller-supplied path expression | Appropriate; datapath cannot express arbitrary user-supplied traversal |
-| `hatrac.py`  | Raw HTTP: `HatracStore` methods           | Appropriate; no datapath equivalent for object store                   |
+| Module       | API Strategy                                         | Status                                                                 |
+|--------------|------------------------------------------------------|------------------------------------------------------------------------|
+| `entity.py`  | Raw HTTP: `/entity/...@sort(RID)@after(rid)?limit=N` | Switched from datapath in Phase 5.6; see note below                    |
+| `catalog.py` | Raw HTTP: `catalog.get("/schema")`                   | Appropriate; no datapath equivalent for schema introspection           |
+| `query.py`   | Raw HTTP: caller-supplied path expression            | Appropriate; datapath cannot express arbitrary user-supplied traversal |
+| `hatrac.py`  | Raw HTTP: `HatracStore` methods                      | Appropriate; no datapath equivalent for object store                   |
+
+Note on `entity.py` switch: `get_entities` was originally datapath-based but the datapath
+`_ResultSet` has no `@after` cursor support. Switching to raw HTTP allows `@sort(RID)` and
+`@after(rid)` in a single URL, giving consistent row ordering and cursor-based pagination
+directly in `get_entities` without requiring the caller to switch to `query_attribute` for
+subsequent pages. `insert_entities`, `update_entities`, and `delete_entities` remain
+datapath-based: `update_entities` uses `PUT /attributegroup` for sparse updates (datapath
+`path.update()` is the only clean way to drive this endpoint); insert and delete follow
+the same pattern for consistency.
 
 #### 5.5.2 Annotation Tools (`tools/annotation.py`) [DONE]
 
@@ -1082,7 +1091,7 @@ and the datapath API directly. No utility routines from deriva-ml were needed.
 
 ---
 
-### Phase 5.6 -- Core Gap Closure [TODO]
+### Phase 5.6 -- Core Gap Closure [DONE -- 2026-03-27]
 
 **Goal:** Close the gaps between the prototype and core that belong in the core platform --
 tools with no `deriva-ml` dependency that improve LLM ergonomics or cover missing DERIVA
@@ -1176,10 +1185,11 @@ are `mutates=True` with audit events.
 Tests: mock catalog and model for `create_vocabulary`; datapath mocks for the synonym
 and description tools.
 
-#### 5.6.4 Catalog Admin Tools (`tools/catalog_admin.py`)
+#### 5.6.4 Catalog Admin Tools (`tools/catalog.py`)
 
-A new module for server-level catalog management operations that use the `DerivaServer`
-and `ErmrestCatalog` APIs directly without any `deriva-ml` dependency.
+Server-level catalog management operations added to the existing `catalog.py` module
+(not a separate file). Use the `DerivaServer` and `ErmrestCatalog` APIs directly
+without any `deriva-ml` dependency.
 
 **`create_catalog(hostname, schema_name?)`** -- Create a new empty ERMrest catalog via
 `DerivaServer.create_ermrest_catalog()`. If `schema_name` is provided, creates that schema
@@ -1238,6 +1248,311 @@ then rename).
 
 Tests: mock vector store and filesystem for add/remove; verify `sources.json` contents;
 verify `rag_ingest` calls `update()` with `force=True`.
+
+#### 5.6.6 Catalog-Level Chaise Annotation (`tools/annotation.py`)
+
+**
+`apply_navbar_annotations(hostname, catalog_id, navbar_brand_text?, head_title?, default_table?, navbar_menu?, auto_schema_menu?, show_system_columns?)`
+** --
+Set the `chaise-config` and `display` annotations at the catalog object level, controlling
+how the Chaise web interface presents the catalog: navbar brand text, browser tab title,
+default landing table, system column visibility, and an optional navigation bar menu.
+
+Standard settings applied on every call: `underline_space`, `deleteRecord`,
+`showFaceting`, `shareCiteAcls`, `exportConfigsSubmenu` (accessible to all users).
+
+Navbar menu options (mutually exclusive; `navbar_menu` takes precedence):
+
+- `navbar_menu`: caller-supplied full `navbarMenu` dict passed through as-is
+- `auto_schema_menu=True`: builds a simple menu from the live schema -- one submenu per
+  non-public schema with all tables listed alphabetically; useful for quick setup
+
+This covers the generic portion of the prototype's `apply_catalog_annotations`. The
+ML-specific menu generation (Workflow, Execution, Dataset groupings; vocabulary/asset/
+feature detection) belongs in the `deriva-ml` plugin and is not in scope for core.
+
+`mutates=True`. Audit events `annotation_apply_navbar` and `annotation_apply_navbar_failed`.
+
+Tests: basic, `default_table`, `navbar_menu`, `auto_schema_menu`, `show_system_columns=False`,
+error+audit paths -- 6 tests.
+
+Status notes (2026-03-26/27):
+
+All sub-phases (5.6.1-5.6.6) implemented and tested. Additional improvements
+completed in the same commit window:
+
+- `clone_catalog` added to `catalog.py` (was listed in gap analysis §3.7 as needing
+  `deriva-ml`; turned out to be a pure `ErmrestCatalog.clone_catalog()` call with no
+  `deriva-ml` dependency).
+- `resolve_snaptime` bugs fixed: (a) Crockford decoder silently accepted ISO date strings
+  like `"2022-05-12"` -- fixed by `_looks_like_snaptime()` guard (checks for uppercase
+  Crockford letters before attempting decode); (b) `catalog.get("")` hit the wrong URL on
+  `ErmrestSnapshot` objects whose `_server_uri` has no trailing slash -- fixed to
+  `catalog.get("/")`.
+- Snaptime format in all `catalog_id` docstrings updated to show dashed format
+  (`2TA-YA2D-ZDWY`) and warn against hand-constructing `ID@snaptime` with plain dates.
+- `get_entities` enhanced: (a) `preflight_count=True` returns row count only, never
+  fetches entities, with `action_required` guidance; (b) `after_rid` cursor parameter;
+  (c) switched from datapath to raw HTTP `/entity/...@sort(RID)@after(rid)?limit=N`
+  so ordering is deterministic and pagination is cursor-based without switching tools.
+- `query_attribute` enhanced: `after_rid` and `limit` parameters added; `@sort(RID)@after(rid)`
+  is appended after the column projection in the URL (required by ERMrest URL grammar).
+
+---
+
+### Phase 5.7 -- Background Task Infrastructure [TODO]
+
+**Goal:** Add a server-level background task system to core so that long-running operations
+(catalog clone, RAG bulk ingest, schema migrations, dataset export) can be submitted as
+async tasks, returning a `task_id` immediately. Plugins use a single shared primitive
+rather than each implementing their own task tracking. Three built-in MCP tools let the
+LLM poll for status and cancel tasks.
+
+This is a platform primitive, not a domain concern. Centralizing it in core prevents
+inconsistent per-plugin implementations.
+
+#### 5.7.1 Task Manager (`tasks/`)
+
+New module `tasks/` with the following structure:
+
+```
+tasks/
+  __init__.py    # re-exports: TaskManager, submit_task, get_task_manager
+  manager.py     # TaskManager class
+```
+
+**`TaskManager`** -- server-level singleton, initialized at startup in `server.py`.
+
+Task lifecycle states: `pending`, `running`, `completed`, `failed`, `cancelled`.
+
+Each task entry stores:
+
+```python
+@dataclass
+class TaskRecord:
+    task_id: str  # UUID4
+    principal: str  # iss/sub of submitting user; "stdio" in stdio mode
+    name: str  # human-readable task name
+    description: str  # optional longer description
+    state: str  # pending | running | completed | failed | cancelled
+    created_at: str  # ISO timestamp
+    started_at: str | None
+    completed_at: str | None
+    result: Any  # JSON-serializable; set on completion
+    error: str | None  # error message on failure
+    progress: str | None  # optional free-form progress string; updated by task coroutine
+```
+
+**`TaskManager` API:**
+
+- `submit(coroutine, name, principal, description?) -> str` -- wrap `coroutine` in a task wrapper
+  that updates state machine, emit `task_submitted` audit event, call
+  `asyncio.create_task(wrapper)`, return `task_id`
+- `get(task_id, principal) -> TaskRecord | None` -- return record if it belongs to
+  `principal`, else `None`
+- `list(principal, status?) -> list[TaskRecord]` -- all tasks for principal, optionally
+  filtered by state
+- `cancel(task_id, principal) -> bool` -- call `asyncio.Task.cancel()` if still running;
+  return True if cancellation was requested
+
+Task wrapper logic:
+
+```python
+async def _run_task(record, coroutine):
+    record.state = "running"
+    record.started_at = now()
+    try:
+        record.result = await coroutine
+        record.state = "completed"
+    except asyncio.CancelledError:
+        record.state = "cancelled"
+        raise
+    except Exception as exc:
+        record.error = str(exc)
+        record.state = "failed"
+    finally:
+        record.completed_at = now()
+        audit_event(f"task_{record.state}", task_id=record.task_id, name=record.name,
+                    principal=record.principal)
+```
+
+**Storage: in-memory only.** Tasks are lost on server restart. Persistence (JSON or SQLite)
+is deferred -- the API is forward-compatible because `TaskRecord` is a plain dataclass
+that serializes to JSON. Add `--task-persist` as a future config option without changing
+the public API.
+
+**Principal scoping:** `submit()` requires `principal` explicitly (the caller reads it from
+the contextvar at submission time). This prevents a task submitted in one request from
+being visible to a different user. In stdio mode, pass `get_request_user_id()` which
+returns `"stdio"`.
+
+**Credential lifetime and task duration:**
+
+The derived token is capped at 30 minutes (Credenza `SessionType.DERIVED`). For tasks
+that outlive a single derived token, the `TaskManager` must be able to re-exchange on
+demand. To support this, `submit()` captures both the `principal` and the original
+`bearer_token` from the HTTP request.
+
+A new `_current_bearer_token: ContextVar[str | None]` is added to `context.py` alongside
+`_current_credential`, set at HTTP request start and readable via `get_request_bearer_token()`.
+The `TaskManager` stores `(principal, bearer_token)` in a private mapping keyed by `task_id`
+(separate from `TaskRecord` to avoid accidental serialization if persistence is added later).
+
+**`TaskManager` gains one additional method:**
+
+- `get_credential(task_id) -> dict` -- async; calls `DerivedTokenCache.get(principal, bearer_token)`
+  to obtain a fresh derived credential, re-exchanging if near expiry. Long-running task
+  coroutines call this before each batch of DERIVA operations rather than holding a captured
+  snapshot.
+
+**Effective task lifetime = bearer token TTL.** The primary session bearer token is
+currently configured at 24 hours, which covers realistic task durations (catalog clone,
+bulk RAG ingest, ML training runs). If the bearer token expires mid-task, `get_credential`
+raises, the task fails with an auth error, and `record.state = "failed"` with an appropriate
+error message.
+
+**Device flow + offline_access:** Obtaining a refresh token via device flow would allow
+indefinite credential renewal, but this path is not viable at the current MCP transport
+layer. FastMCP only sees the Bearer access token in the HTTP Authorization header -- the
+refresh token lives in the MCP client and is never sent to the server. For the server to
+benefit, the refresh token would need to be passed explicitly at task submission time, which
+is a non-standard and security-sensitive pattern. Defer until there is a concrete need.
+
+**Future path if 24-hour tokens are insufficient:** Credenza can issue a task-scoped token
+at submission time with a configurable TTL via `token_exchange`. This requires no client-side
+changes and fits the existing token exchange model. Defer until a concrete use case arises.
+
+#### 5.7.2 PluginContext Extension (`plugin/api.py`)
+
+Add `submit_task(coroutine, name, description?) -> str` to `PluginContext`. This reads the
+current principal and bearer token from contextvars (must be called within a tool handler)
+and delegates to `_task_manager.submit(coroutine, name, principal, bearer_token, description)`.
+Returns the `task_id`.
+
+```python
+# Example usage inside a tool handler -- async task:
+task_id = ctx.submit_task(
+    _do_clone(hostname, src_id, dst_id),
+    name=f"clone_catalog {src_id} -> {dst_id}",
+)
+return json.dumps({"task_id": task_id, "status": "submitted"})
+```
+
+The running coroutine calls `task_manager.get_credential(task_id)` before each DERIVA
+operation to get a fresh derived credential (re-exchanged automatically if near expiry).
+
+**Synchronous plugin code:** Many deriva-ml operations (training loops, data processing
+pipelines) are synchronous and cannot be submitted as coroutines directly without blocking
+the entire event loop. Wrap them with `asyncio.to_thread()`:
+
+```python
+# Synchronous work -- wrap in an async coroutine first so credential
+# refresh (async) and thread dispatch can be composed cleanly:
+async def _run_training_task(task_id, dataset_path, params):
+    cred = await task_manager.get_credential(task_id)
+    result = await asyncio.to_thread(run_training_sync, dataset_path, params, cred)
+    return result
+
+
+task_id = ctx.submit_task(
+    _run_training_task(...),
+    name="model_training",
+)
+```
+
+`asyncio.to_thread()` runs the callable in a thread pool executor without blocking the
+event loop. Capture any credential before entering the thread; `get_credential` is async
+and cannot be called from inside the thread directly. The async wrapper pattern above
+handles this correctly: fetch credential in async context, pass as plain value into thread.
+
+Plugins that don't use the `PluginContext` wrapper (e.g., they call `submit_task` from
+a lifecycle hook) import `get_task_manager()` from `deriva_mcp_core.tasks` and call
+`manager.submit(coroutine, name, principal, bearer_token, description)` directly, reading
+the principal and bearer token from `get_request_user_id()` and `get_request_bearer_token()`.
+
+#### 5.7.3 Built-in MCP Tools (`tools/tasks.py`)
+
+New module `tools/tasks.py` registered from `server.py`. Three tools, all `mutates=False`
+(task management does not write to the DERIVA catalog):
+
+**`get_task_status(task_id)`** -- Return the full `TaskRecord` for the given task if it
+belongs to the calling principal. Returns `{"error": "not found"}` for unknown or
+other-principal task IDs (no information leakage).
+
+**`list_tasks(status?)`** -- Return all tasks for the calling principal. Optional `status`
+filter (`"running"`, `"completed"`, `"failed"`, `"cancelled"`, `"pending"`). Returns
+tasks sorted by `created_at` descending.
+
+**`cancel_task(task_id)`** -- Request cancellation of a running task. Returns
+`{"cancelled": true}` if the request was accepted, `{"cancelled": false, "reason": "..."}`
+if the task is already completed or does not belong to the caller.
+
+All three registered with `mutates=False`. No audit events needed beyond what the task
+wrapper already emits.
+
+#### 5.7.4 `clone_catalog_async` (`tools/catalog.py`)
+
+Add `clone_catalog_async` alongside the existing synchronous `clone_catalog`. Takes the
+same parameters plus an optional `task_name` override. Captures the credential before
+submitting, then calls `ctx.submit_task(coroutine, name)`.
+
+```python
+@ctx.tool(mutates=True)
+async def clone_catalog_async(
+        hostname: str,
+        source_catalog_id: str,
+        dest_catalog_id: str | None = None,
+        copy_data: bool = True,
+        copy_annotations: bool = True,
+        copy_policy: bool = True,
+        exclude_schemas: list[str] | None = None,
+        name: str | None = None,
+        description: str | None = None,
+) -> str:
+    """Submit a catalog clone as a background task. Returns a task_id immediately.
+
+    Use get_task_status(task_id) to poll for completion. For small catalogs,
+    prefer clone_catalog (synchronous) to avoid the polling overhead.
+    """
+    task_id = ctx.submit_task(
+        _clone_coroutine(hostname, source_catalog_id, dest_catalog_id, copy_data,
+                         copy_annotations, copy_policy, exclude_schemas, name,
+                         description),
+        name=f"clone_catalog {source_catalog_id}",
+    )
+    audit_event("catalog_clone_async_submitted", hostname=hostname,
+                source_catalog_id=source_catalog_id, task_id=task_id)
+    return json.dumps({"task_id": task_id, "status": "submitted"})
+```
+
+The inner coroutine `_clone_coroutine` receives `task_id` and calls
+`task_manager.get_credential(task_id)` before each DERIVA operation so that derived token
+re-exchange happens automatically if the clone runs longer than 30 minutes. A 24-hour
+bearer token window means the full clone can run without interruption under normal
+conditions.
+
+#### 5.7.5 `rag_update_docs_async` (`rag/tools.py`)
+
+`rag_update_docs` runs inline and can be slow for a large documentation corpus. Add
+`rag_update_docs_async(source_name?)` that submits the same work via `ctx.submit_task`.
+Returns `task_id` immediately. The LLM polls `get_task_status` to confirm completion.
+
+No credential capture needed for RAG operations -- the vector store uses a service-level
+connection, not a per-request credential.
+
+#### 5.7.6 Tests
+
+- `tests/test_tasks.py` -- unit tests for `TaskManager`: submit, get, list, cancel,
+  principal isolation (task from principal A not visible to principal B), state machine
+  transitions, cancellation of already-completed task returns False
+- `tests/test_tools.py` -- extend with task tool tests: `get_task_status` not-found,
+  `list_tasks` with status filter, `cancel_task` accepted and rejected cases
+- `tests/test_catalog_tools.py` (or equivalent) -- `clone_catalog_async` submits a task
+  and returns `task_id`; mock `ctx.submit_task` to avoid running the actual clone
+
+Deliverable: Background task infrastructure in core. `clone_catalog_async` and
+`rag_update_docs_async` as the first two consumers. Plugin authors use
+`ctx.submit_task()` for any long-running operation.
 
 ---
 

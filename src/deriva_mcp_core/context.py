@@ -111,7 +111,7 @@ def deriva_call():
 
         try:
             with deriva_call():
-                catalog = get_deriva_server(hostname).connect_ermrest(catalog_id)
+                catalog = get_catalog(hostname, catalog_id)
                 result = catalog.get(url).json()
                 return json.dumps({...})
         except Exception as exc:
@@ -196,7 +196,7 @@ def init_hostname_map(mapping: dict[str, str]) -> None:
     """Set the hostname remap table for outbound DERIVA connections.
 
     Called once at server startup from create_server(). Replaces the module-level
-    map so that get_deriva_server() and get_hatrac_store() route tool hostnames
+    map so that get_catalog() and get_hatrac_store() route tool hostnames
     through the internal network alias when running inside a Docker container.
     """
     global _hostname_map
@@ -228,13 +228,10 @@ def _set_catalog_access_fn(fn: Callable[[str, str], None]) -> None:
 def get_catalog(hostname: str, catalog_id: str):
     """Return an authenticated ErmrestCatalog for the current request context.
 
-    Convenience wrapper around get_deriva_server(hostname).connect_ermrest().
+    Gets a ErmrestCatalog instance.
     Also fires the catalog-access callback (registered by catalog.py at startup)
     so that RAG schema indexing is triggered automatically on first access --
     without requiring an explicit catalog introspection tool call.
-
-    Use this in all tool modules instead of the two-step
-    get_deriva_server(hostname).connect_ermrest(catalog_id) pattern.
 
     Args:
         hostname: Hostname of the DERIVA server (e.g. "deriva.example.org").
