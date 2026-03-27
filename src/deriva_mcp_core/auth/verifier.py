@@ -24,7 +24,12 @@ from .introspect import IntrospectionError, TokenInactiveError
 from .introspect_cache import IntrospectionCache
 from .token_cache import DerivedTokenCache
 from ..config import Settings
-from ..context import set_current_credential, set_current_user_id, set_mutation_allowed
+from ..context import (
+    set_current_bearer_token,
+    set_current_credential,
+    set_current_user_id,
+    set_mutation_allowed,
+)
 from ..telemetry import audit_event
 
 logger = logging.getLogger(__name__)
@@ -119,9 +124,10 @@ class CredenzaTokenVerifier:
             audit_event("token_exchange_failed", principal=principal)
             return None
 
-        # Step 4: set the per-request credential and user identity.
+        # Step 4: set the per-request credential, user identity, and bearer token.
         set_current_credential({"bearer-token": derived_token})
         set_current_user_id(principal)
+        set_current_bearer_token(token)
 
         # Step 5: evaluate mutation claim if configured.
         claim_spec = self._settings.mutation_required_claim

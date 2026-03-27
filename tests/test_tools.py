@@ -408,6 +408,68 @@ class TestCatalogTools:
         assert "error" in result
         assert mock_audit.call_args[0][0] == "catalog_clone_failed"
 
+    # -- clone_catalog_async --
+
+    @pytest.fixture()
+    def task_ctx(self, capturing_mcp):
+        """Context with a real TaskManager injected."""
+        from deriva_mcp_core.tasks.manager import TaskManager, _set_task_manager
+
+        mock_cache = AsyncMock()
+        mock_cache.get = AsyncMock(return_value="derived-tok")
+        mgr = TaskManager(token_cache=mock_cache)
+        _set_task_manager(mgr)
+        _ctx = PluginContext(capturing_mcp, task_manager=mgr)
+        _set_plugin_context(_ctx)
+        from deriva_mcp_core.tools import catalog
+        catalog.register(_ctx)
+        return _ctx, mgr, capturing_mcp.tools
+
+    async def test_clone_catalog_async_submits_task(self, task_ctx):
+        import asyncio
+        from unittest.mock import MagicMock
+
+        _, mgr, tools = task_ctx
+        mock_clone_result = MagicMock()
+        mock_clone_result.catalog_id = "55"
+        mock_server = MagicMock()
+        mock_server.connect_ermrest.return_value.clone_catalog.return_value = mock_clone_result
+
+        # Keep all patches active while the background task runs -- the tool returns
+        # immediately (task submitted) but the inner coroutine runs after the next yield.
+        p_server = patch("deriva_mcp_core.tools.catalog.DerivaServer", return_value=mock_server)
+        p_uid = patch("deriva_mcp_core.context._current_user_id")
+        p_tok = patch("deriva_mcp_core.context._current_bearer_token")
+        p_audit = patch("deriva_mcp_core.tools.catalog.audit_event")
+
+        with p_server, p_uid as mock_uid, p_tok as mock_tok, p_audit:
+            mock_uid.get.return_value = "alice"
+            mock_tok.get.return_value = "bearer-tok"
+            result = json.loads(await tools["clone_catalog_async"]("h", "1"))
+            assert result["status"] == "submitted"
+            task_id = result["task_id"]
+            # Let the background task run while patches are still active
+            await asyncio.sleep(0.1)
+
+        record = mgr.get(task_id, "alice")
+        assert record is not None
+        assert record.state == "completed"
+        assert record.result["dest_catalog_id"] == "55"
+
+    async def test_clone_catalog_async_submit_error(self, capturing_mcp):
+        """If TaskManager is not configured, submit_task raises and we get an error."""
+        _ctx = PluginContext(capturing_mcp, task_manager=None)
+        _set_plugin_context(_ctx)
+        from deriva_mcp_core.tools import catalog
+        catalog.register(_ctx)
+        tools = capturing_mcp.tools
+        with patch("deriva_mcp_core.context._current_user_id") as mock_uid, \
+             patch("deriva_mcp_core.context._current_bearer_token") as mock_tok:
+            mock_uid.get.return_value = "alice"
+            mock_tok.get.return_value = None
+            result = json.loads(await tools["clone_catalog_async"]("h", "1"))
+        assert "error" in result
+
     # -- create_catalog_alias / update_catalog_alias / delete_catalog_alias --
 
     async def test_create_catalog_alias(self, ctx, mock_catalog):
@@ -525,10 +587,10 @@ class TestCatalogTools:
              patch("deriva_mcp_core.tools.catalog.get_request_credential", return_value={}), \
              patch("deriva_mcp_core.tools.catalog.audit_event"):
             result = json.loads(
-                await tools["create_catalog"]("h", schema_name="myschema")
+                await tools["create_catalog"]("h", initial_schema="myschema")
             )
         assert result["status"] == "created"
-        assert result["schema_name"] == "myschema"
+        assert result["initial_schema"] == "myschema"
         mock_new_catalog.getCatalogModel.return_value.create_schema.call_count == 1
 
     async def test_create_catalog_error(self, ctx, mock_catalog):
@@ -602,7 +664,9 @@ class TestEntityTools:
         tools = self._register(ctx)
         with self._patch_server(mock_catalog):
             result = json.loads(await tools["get_entities"]("h", "1", "public", "MyTable"))
-        assert result["count"] == 1
+        assert result["returned_count"] == 1
+        assert result["truncated"] is False
+        assert "next_after_rid" not in result
         assert result["entities"] == [{"RID": "1-AAA", "Name": "foo"}]
         url = mock_catalog.get.call_args[0][0]
         assert "public:MyTable" in url
@@ -630,6 +694,34 @@ class TestEntityTools:
         url = mock_catalog.get.call_args[0][0]
         assert "@sort(RID)@after(Q-Y4CM)" in url
         assert "?limit=10" in url
+
+    async def test_get_entities_truncated_when_full_page(self, ctx, mock_catalog):
+        """When returned_count == limit, truncated=True and next_after_rid is provided."""
+        rows = [{"RID": f"1-{i:04X}", "Name": f"row{i}"} for i in range(10)]
+        mock_catalog.get.side_effect = None
+        mock_catalog.get.return_value.json.return_value = rows
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["get_entities"]("h", "1", "public", "MyTable", limit=10)
+            )
+        assert result["returned_count"] == 10
+        assert result["truncated"] is True
+        assert result["next_after_rid"] == rows[-1]["RID"]
+
+    async def test_get_entities_not_truncated_when_partial_page(self, ctx, mock_catalog):
+        """When returned_count < limit, truncated=False and next_after_rid is absent."""
+        rows = [{"RID": "1-AAA", "Name": "only"}]
+        mock_catalog.get.side_effect = None
+        mock_catalog.get.return_value.json.return_value = rows
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["get_entities"]("h", "1", "public", "MyTable", limit=10)
+            )
+        assert result["returned_count"] == 1
+        assert result["truncated"] is False
+        assert "next_after_rid" not in result
 
     async def test_get_entities_preflight_count(self, ctx, mock_catalog):
         mock_catalog.get.side_effect = None
@@ -2962,3 +3054,102 @@ class TestSchemaTools:
         assert "error" in result
         mock_audit.assert_called_once()
         assert mock_audit.call_args[0][0] == "schema_set_column_nullok_failed"
+
+
+# ---------------------------------------------------------------------------
+# Task management tools
+# ---------------------------------------------------------------------------
+
+
+class TestTaskTools:
+    """Tests for get_task_status, list_tasks, cancel_task."""
+
+    @pytest.fixture()
+    def task_ctx(self, capturing_mcp):
+        from deriva_mcp_core.tasks.manager import TaskManager, _set_task_manager
+
+        mgr = TaskManager(token_cache=None)
+        _set_task_manager(mgr)
+        _ctx = PluginContext(capturing_mcp, task_manager=mgr)
+        _set_plugin_context(_ctx)
+
+        from deriva_mcp_core.tools import tasks as tasks_module
+
+        tasks_module.register(_ctx)
+        yield _ctx, mgr, capturing_mcp.tools
+
+    async def test_get_task_status_not_found(self, task_ctx):
+        _, _, tools = task_ctx
+        with patch("deriva_mcp_core.tools.tasks.get_request_user_id", return_value="u1"):
+            result = json.loads(await tools["get_task_status"]("no-such-id"))
+        assert result == {"error": "not found"}
+
+    async def test_get_task_status_found(self, task_ctx):
+        _, mgr, tools = task_ctx
+
+        async def _noop():
+            return {"x": 1}
+
+        task_id = mgr.submit(_noop(), name="test", principal="u1", bearer_token=None)
+        import asyncio
+
+        await asyncio.sleep(0.01)
+        with patch("deriva_mcp_core.tools.tasks.get_request_user_id", return_value="u1"):
+            result = json.loads(await tools["get_task_status"](task_id))
+        assert result["task_id"] == task_id
+        assert result["state"] == "completed"
+
+    async def test_list_tasks_empty(self, task_ctx):
+        _, _, tools = task_ctx
+        with patch("deriva_mcp_core.tools.tasks.get_request_user_id", return_value="u1"):
+            result = json.loads(await tools["list_tasks"]())
+        assert result == []
+
+    async def test_list_tasks_with_status_filter(self, task_ctx):
+        import asyncio
+
+        _, mgr, tools = task_ctx
+
+        async def _noop():
+            return {}
+
+        async def _fail():
+            raise RuntimeError("oops")
+
+        mgr.submit(_noop(), name="ok", principal="u1", bearer_token=None)
+        mgr.submit(_fail(), name="bad", principal="u1", bearer_token=None)
+        await asyncio.sleep(0.01)
+
+        with patch("deriva_mcp_core.tools.tasks.get_request_user_id", return_value="u1"):
+            completed = json.loads(await tools["list_tasks"]("completed"))
+            failed = json.loads(await tools["list_tasks"]("failed"))
+        assert len(completed) == 1
+        assert len(failed) == 1
+
+    async def test_list_tasks_invalid_status(self, task_ctx):
+        _, _, tools = task_ctx
+        with patch("deriva_mcp_core.tools.tasks.get_request_user_id", return_value="u1"):
+            result = json.loads(await tools["list_tasks"]("bogus"))
+        assert "error" in result
+        assert "invalid status" in result["error"]
+
+    async def test_cancel_task_accepted(self, task_ctx):
+        import asyncio
+
+        _, mgr, tools = task_ctx
+
+        async def _slow():
+            await asyncio.sleep(5)
+
+        task_id = mgr.submit(_slow(), name="slow", principal="u1", bearer_token=None)
+        await asyncio.sleep(0)
+        with patch("deriva_mcp_core.tools.tasks.get_request_user_id", return_value="u1"):
+            result = json.loads(await tools["cancel_task"](task_id))
+        assert result == {"cancelled": True}
+
+    async def test_cancel_task_rejected_not_found(self, task_ctx):
+        _, _, tools = task_ctx
+        with patch("deriva_mcp_core.tools.tasks.get_request_user_id", return_value="u1"):
+            result = json.loads(await tools["cancel_task"]("no-such-id"))
+        assert result["cancelled"] is False
+        assert "not found" in result["reason"]

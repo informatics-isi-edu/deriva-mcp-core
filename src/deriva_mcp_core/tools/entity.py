@@ -259,12 +259,18 @@ def register(ctx: PluginContext) -> None:
                 )
                 entities = catalog.get(url).json()
 
-            return json.dumps({
+            returned_count = len(entities)
+            truncated = returned_count == effective_limit
+            result: dict = {
                 "schema": schema,
                 "table": table,
-                "count": len(entities),
+                "returned_count": returned_count,
+                "truncated": truncated,
                 "entities": entities,
-            })
+            }
+            if truncated and entities:
+                result["next_after_rid"] = entities[-1]["RID"]
+            return json.dumps(result)
         except Exception as exc:
             return json.dumps(await _entity_error(exc, hostname, catalog_id, schema, table, "get_entities"))
 

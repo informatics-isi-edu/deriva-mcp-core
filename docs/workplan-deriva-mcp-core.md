@@ -1349,7 +1349,7 @@ precedence, no-config fast path).
 
 ---
 
-### Phase 5.7 -- Background Task Infrastructure [TODO]
+### Phase 5.7 -- Background Task Infrastructure [DONE]
 
 **Goal:** Add a server-level background task system to core so that long-running operations
 (catalog clone, RAG bulk ingest, schema migrations, dataset export) can be submitted as
@@ -1580,7 +1580,7 @@ re-exchange happens automatically if the clone runs longer than 30 minutes. A 24
 bearer token window means the full clone can run without interruption under normal
 conditions.
 
-#### 5.7.5 `rag_update_docs_async` (`rag/tools.py`)
+#### 5.7.5 `rag_update_docs_async` (`rag/tools.py`) [DONE]
 
 `rag_update_docs` runs inline and can be slow for a large documentation corpus. Add
 `rag_update_docs_async(source_name?)` that submits the same work via `ctx.submit_task`.
@@ -1589,19 +1589,52 @@ Returns `task_id` immediately. The LLM polls `get_task_status` to confirm comple
 No credential capture needed for RAG operations -- the vector store uses a service-level
 connection, not a per-request credential.
 
-#### 5.7.6 Tests
+Both `rag_update_docs` and `rag_update_docs_async` were updated to accept `force: bool = False`.
+When `force=True`, both tools call `docs_manager.ingest(src, force=True)` which bypasses
+the SHA delta cache and re-fetches all files. This eliminates the need for a separate
+`rag_ingest` call when a forced full rebuild is needed.
 
-- `tests/test_tasks.py` -- unit tests for `TaskManager`: submit, get, list, cancel,
+#### 5.7.6 Tests [DONE]
+
+- `tests/test_tasks.py` -- 20 unit tests for `TaskManager`: submit, get, list, cancel,
   principal isolation (task from principal A not visible to principal B), state machine
-  transitions, cancellation of already-completed task returns False
-- `tests/test_tools.py` -- extend with task tool tests: `get_task_status` not-found,
-  `list_tasks` with status filter, `cancel_task` accepted and rejected cases
-- `tests/test_catalog_tools.py` (or equivalent) -- `clone_catalog_async` submits a task
-  and returns `task_id`; mock `ctx.submit_task` to avoid running the actual clone
+  transitions, cancellation of already-completed task returns False, get_credential with
+  mock token cache, update_progress, description field
+- `tests/test_tools.py` -- 7 task tool tests: `get_task_status` not-found and found,
+  `list_tasks` empty/status-filter/invalid-status, `cancel_task` accepted and rejected
+- `tests/test_tools.py::TestCatalogTools` -- 2 `clone_catalog_async` tests: happy path
+  (patches kept live during background task execution; asserts task completes with correct
+  dest_catalog_id), and submit error when TaskManager not configured
+- `tests/test_rag_tools.py::TestRagUpdateDocs` -- 2 additional tests for `force` param:
+  confirms `ingest` called with `force=False` by default, and `force=True` when passed
+
+Test count: 433 passing, 6 skipped, 91% coverage (2026-03-27).
 
 Deliverable: Background task infrastructure in core. `clone_catalog_async` and
 `rag_update_docs_async` as the first two consumers. Plugin authors use
 `ctx.submit_task()` for any long-running operation.
+
+#### 5.7.7 Future: Task State Persistence [TODO]
+
+Task state is currently in-memory only and is lost on server restart. The `TaskRecord`
+dataclass is intentionally JSON-serializable (all fields are plain types) so that
+persistence can be added later without changing the public API.
+
+Planned approach when a concrete use case arises:
+
+- Add `DERIVA_MCP_TASK_PERSIST_PATH` (filesystem path) or
+  `DERIVA_MCP_TASK_PERSIST_BACKEND` (`sqlite` or `postgresql`) to `Settings`
+- `TaskManager.__init__` loads existing records from the backend on startup
+- `_run_task` flushes state changes (pending -> running -> completed/failed/cancelled)
+  to the backend after each transition
+- Completed/failed records are retained for a configurable TTL then purged
+- The `TaskRecord.task_id` (UUID4) and `TaskRecord.principal` fields ensure
+  records are portable across restart and remain principal-scoped
+
+No schema changes to `TaskRecord` are needed; the dataclass already covers all
+persistence-relevant fields. The `_credentials` dict (principal, bearer_token pairs)
+is deliberately kept separate from `TaskRecord` and must NOT be persisted -- bearer
+tokens must not be written to disk.
 
 ---
 

@@ -1,6 +1,6 @@
 # Gap Analysis: deriva-mcp prototype vs deriva-mcp-core
 
-**Date:** 2026-03-26 (updated; original 2026-03-25)
+**Date:** 2026-03-27 (updated; original 2026-03-25)
 
 **Prototype:** `deriva-mcp` (DerivaML MCP Server)
 
@@ -218,22 +218,26 @@ FK patterns). They belong in a `deriva-ml` plugin rather than in core.
 
 ### 2.7 RAG Tools
 
-| Prototype tool                                                             | Core equivalent                                            | Notes                                                                  |
-|----------------------------------------------------------------------------|------------------------------------------------------------|------------------------------------------------------------------------|
-| `rag_search(query, limit, source, doc_type, include_schema, include_data)` | `rag_search(query, limit, hostname, catalog_id, doc_type)` | Near parity; different parameter shapes for catalog scoping            |
-| `rag_ingest(source_name)`                                                  | `rag_ingest(source_name?)`                                 | **DONE (Phase 5.6.5)** -- force full re-crawl, bypasses SHA-delta      |
-| `rag_update(source_name)`                                                  | `rag_update_docs(source_name)`                             | Parity -- incremental SHA-delta update                                 |
-| `rag_status()`                                                             | `rag_status()`                                             | Parity                                                                 |
-| `rag_add_source(name, repo_owner, repo_name, branch, path_prefix, ...)`    | `rag_add_source(name, repo_owner, ...)`                    | **DONE (Phase 5.6.5)** -- persists to `sources.json`                   |
-| `rag_remove_source(name)`                                                  | `rag_remove_source(name)`                                  | **DONE (Phase 5.6.5)** -- removes from `sources.json` and vector store |
-| `rag_index_schema()`                                                       | `rag_index_schema(hostname, catalog_id)`                   | Prototype uses active connection; core takes explicit params           |
-| None                                                                       | `rag_index_table(hostname, catalog_id, schema, table)`     | Core only -- per-user table data indexing                              |
+| Prototype tool                                                             | Core equivalent                                            | Notes                                                                                        |
+|----------------------------------------------------------------------------|------------------------------------------------------------|----------------------------------------------------------------------------------------------|
+| `rag_search(query, limit, source, doc_type, include_schema, include_data)` | `rag_search(query, limit, hostname, catalog_id, doc_type)` | Near parity; different parameter shapes for catalog scoping                                  |
+| `rag_ingest(source_name)`                                                  | `rag_ingest(source_name?)`                                 | **DONE (Phase 5.6.5)** -- force full re-crawl, bypasses SHA-delta                            |
+| `rag_update(source_name)`                                                  | `rag_update_docs(source_name, force?)`                     | **DONE** -- incremental SHA-delta default; `force=True` bypasses SHA cache for full re-fetch |
+| `rag_status()`                                                             | `rag_status()`                                             | Parity                                                                                       |
+| `rag_add_source(name, repo_owner, repo_name, branch, path_prefix, ...)`    | `rag_add_source(name, repo_owner, ...)`                    | **DONE (Phase 5.6.5)** -- persists to `sources.json`                                         |
+| `rag_remove_source(name)`                                                  | `rag_remove_source(name)`                                  | **DONE (Phase 5.6.5)** -- removes from `sources.json` and vector store                       |
+| `rag_index_schema()`                                                       | `rag_index_schema(hostname, catalog_id)`                   | Prototype uses active connection; core takes explicit params                                 |
+| None                                                                       | `rag_index_table(hostname, catalog_id, schema, table)`     | Core only -- per-user table data indexing                                                    |
 
 **Key difference:** Prototype `rag_ingest` and `rag_update` dispatch work as background
 tasks via `BackgroundTaskManager` and return a `task_id` for progress polling. Core's
-`rag_ingest` and `rag_update_docs` both run inline. Background task infrastructure is
-planned for Phase 5.7; once available, `rag_update_docs_async` will be added as a
-non-blocking variant.
+`rag_update_docs` runs inline; `rag_update_docs_async` (Phase 5.7.5) submits the same
+work via `ctx.submit_task()` and returns a `task_id` immediately. The LLM polls
+`get_task_status` to confirm completion.
+
+Both `rag_update_docs` and `rag_update_docs_async` accept `force=True` to bypass the
+SHA delta cache and re-fetch all files regardless of whether content appears unchanged.
+This mirrors the prototype's `rag_ingest` behavior without requiring a separate tool call.
 
 ### 2.8 Hatrac Object Store
 
@@ -334,22 +338,24 @@ types. All require `deriva-ml` and belong in a `deriva-ml` plugin.
 | `set_workflow_description` | `(workflow_rid, description)`             | Update workflow description          |
 | `add_workflow_type`        | `(type_name, description)`                | Add term to Workflow_Type vocabulary |
 
-### 3.5 Background Task Tools (planned -- Phase 5.7)
+### 3.5 Background Task Tools (DONE -- Phase 5.7)
 
 These 4 tools manage long-running operations. The prototype dispatches to a thread pool
-with persistent disk state. Core's equivalent is designed for Phase 5.7: asyncio-based,
-in-memory, principal-scoped, with credential re-exchange support for tasks up to 24 hours.
+with persistent disk state. Core is asyncio-based, in-memory, principal-scoped, with
+credential re-exchange support for tasks up to 24 hours (bearer token TTL).
 
-| Tool                  | Prototype signature                                   | Description                          | Core status            |
-|-----------------------|-------------------------------------------------------|--------------------------------------|------------------------|
-| `clone_catalog_async` | `(source_hostname, source_catalog_id, root_rid, ...)` | Clone catalog as background task     | Planned -- Phase 5.7.4 |
-| `get_task_status`     | `(task_id)`                                           | Get task progress, result, and error | Planned -- Phase 5.7.3 |
-| `list_tasks`          | `(status_filter, task_type_filter)`                   | List all tasks for current user      | Planned -- Phase 5.7.3 |
-| `cancel_task`         | `(task_id)`                                           | Cancel a running task                | Planned -- Phase 5.7.3 |
+| Tool                  | Prototype signature                                   | Description                          | Core status             |
+|-----------------------|-------------------------------------------------------|--------------------------------------|-------------------------|
+| `clone_catalog_async` | `(source_hostname, source_catalog_id, root_rid, ...)` | Clone catalog as background task     | **DONE -- Phase 5.7.4** |
+| `get_task_status`     | `(task_id)`                                           | Get task progress, result, and error | **DONE -- Phase 5.7.3** |
+| `list_tasks`          | `(status_filter, task_type_filter)`                   | List all tasks for current user      | **DONE -- Phase 5.7.3** |
+| `cancel_task`         | `(task_id)`                                           | Cancel a running task                | **DONE -- Phase 5.7.3** |
 
 The prototype persists task state to disk (`~/.deriva-ml/task_state.json`) and recovers
-crashed tasks on restart. Core Phase 5.7 uses in-memory state only; persistence is
-deferred but the `TaskRecord` dataclass is JSON-serializable for forward compatibility.
+crashed tasks on restart. Core Phase 5.7 uses in-memory state only -- tasks are lost on
+server restart. Persistence is deferred (see Phase 5.7.7 in the workplan); the
+`TaskRecord` dataclass is JSON-serializable for forward compatibility. Bearer tokens are
+intentionally excluded from any future persistence path.
 
 ### 3.6 Developer Tools (all absent)
 
@@ -656,21 +662,29 @@ original core design:
 cursor semantics (`@sort(RID)@after(rid)` appended after the column projection, before
 `?limit=N`, as required by the ERMrest URL grammar).
 
-### Background task infrastructure (planned -- Phase 5.7)
+### Background task infrastructure (DONE -- Phase 5.7, 2026-03-27)
 
 The prototype's `BackgroundTaskManager` was initially marked out of scope for core.
 Decision reversed: background tasks are a general platform primitive and centralizing
-them in core prevents inconsistent per-plugin implementations. See Phase 5.7 in
-`workplan-deriva-mcp-core.md` for the full design.
+them in core prevents inconsistent per-plugin implementations.
 
-Planned additions:
+Delivered:
 
-- `tasks/manager.py` -- `TaskManager` singleton; asyncio-based, in-memory state
-- `PluginContext.submit_task(coroutine, name)` -- returns `task_id`; captures principal and bearer token from contextvar
-- Three MCP tools: `get_task_status`, `list_tasks`, `cancel_task`
-- `clone_catalog_async` and `rag_update_docs_async` as first consumers
-- Effective task lifetime = bearer token TTL (currently 24 hours); tasks needing longer lifetimes use
-  `TaskManager.get_credential(task_id)` for on-demand derived token re-exchange
+- `tasks/manager.py` -- `TaskManager` singleton; asyncio-based, in-memory state;
+  principal-scoped get/list/cancel; `get_credential(task_id)` for derived token
+  re-exchange; `update_progress(task_id, msg)` for in-flight status
+- `PluginContext.submit_task(coroutine, name)` -- returns `task_id`; captures principal
+  and bearer token from contextvars at call time
+- Three MCP tools: `get_task_status`, `list_tasks` (with status filter), `cancel_task`
+- `clone_catalog_async` (tools/catalog.py) and `rag_update_docs_async` (rag/tools.py)
+  as first consumers
+- Effective task lifetime = bearer token TTL (currently 24 hours); `get_credential`
+  re-exchanges automatically when derived token nears expiry
+
+**Task persistence is not yet implemented.** Tasks are lost on server restart. The
+`TaskRecord` dataclass is JSON-serializable and bearer tokens are kept in a separate
+non-serializable mapping. See Phase 5.7.7 in the workplan for the deferred persistence
+design (`DERIVA_MCP_TASK_PERSIST_PATH` / SQLite or PostgreSQL backend).
 
 ---
 

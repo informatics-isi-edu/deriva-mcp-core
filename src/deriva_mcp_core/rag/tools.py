@@ -189,7 +189,10 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
             return json.dumps({"error": str(exc)})
 
     @ctx.tool(mutates=False)
-    async def rag_update_docs(source_name: str | None = None) -> str:
+    async def rag_update_docs(
+        source_name: str | None = None,
+        force: bool = False,
+    ) -> str:
         """Incrementally update indexed documentation (SHA delta).
 
         Crawls GitHub repositories and re-indexes only files whose SHA has
@@ -198,6 +201,9 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
         Args:
             source_name: Specific source to update (e.g., "deriva-py-docs").
                 If omitted, all sources are updated.
+            force: If True, re-fetch and re-index all files regardless of SHA.
+                Use when content may have changed without a SHA update, or to
+                force a full rebuild. Default False (incremental).
         """
         try:
             targets = (
@@ -207,11 +213,51 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
                 return json.dumps({"error": f"Unknown source: {source_name!r}"})
             counts = {}
             for src in targets:
-                counts[src.name] = await docs_manager.update(src)
+                counts[src.name] = await docs_manager.ingest(src, force=force)
             return json.dumps({"updated": counts})
         except Exception as exc:
             logger.error("rag_update_docs failed: %s", exc)
             return json.dumps({"error": str(exc)})
+
+    @ctx.tool(mutates=False)
+    async def rag_update_docs_async(
+        source_name: str | None = None,
+        force: bool = False,
+    ) -> str:
+        """Submit a documentation update as a background task. Returns task_id immediately.
+
+        Same behavior as rag_update_docs but runs in the background so the tool
+        returns immediately. Use get_task_status(task_id) to poll for completion.
+
+        Args:
+            source_name: Specific source to update (e.g., "deriva-py-docs").
+                If omitted, all sources are updated.
+            force: If True, re-fetch and re-index all files regardless of SHA.
+                Use when content may have changed without a SHA update, or to
+                force a full rebuild. Default False (incremental).
+        """
+        targets = (
+            [s for s in all_sources if s.name == source_name] if source_name else all_sources
+        )
+        if source_name and not targets:
+            return json.dumps({"error": f"Unknown source: {source_name!r}"})
+
+        async def _do_update() -> dict:
+            counts = {}
+            for src in targets:
+                counts[src.name] = await docs_manager.ingest(src, force=force)
+            return {"updated": counts}
+
+        task_label = source_name or "all-sources"
+        try:
+            task_id = ctx.submit_task(
+                _do_update(),
+                name=f"rag_update_docs {task_label}",
+            )
+        except Exception as exc:
+            logger.error("rag_update_docs_async failed to submit: %s", exc)
+            return json.dumps({"error": str(exc)})
+        return json.dumps({"task_id": task_id, "status": "submitted"})
 
     @ctx.tool(mutates=False)
     async def rag_index_schema(hostname: str, catalog_id: str) -> str:

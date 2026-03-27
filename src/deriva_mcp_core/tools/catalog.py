@@ -46,8 +46,16 @@ from deriva.core.ermrest_model import (
 )
 
 from . import fmt_exc
-from ..context import _remap, _set_catalog_access_fn, deriva_call, get_catalog, get_request_credential
+from ..context import (
+    _remap,
+    _set_catalog_access_fn,
+    deriva_call,
+    get_catalog,
+    get_request_credential,
+    get_request_user_id,
+)
 from ..plugin.api import fire_catalog_connect
+from ..tasks.manager import get_task_manager
 from ..telemetry import audit_event
 
 if TYPE_CHECKING:
@@ -443,8 +451,8 @@ def register(ctx: PluginContext) -> None:
     @ctx.tool(mutates=True)
     async def create_catalog(
         hostname: str,
-        schema_name: str | None = None,
-        schema_comment: str = "",
+        initial_schema: str | None = None,
+        initial_schema_comment: str = "",
         name: str | None = None,
         description: str | None = None,
         catalog_id: str | None = None,
@@ -455,12 +463,12 @@ def register(ctx: PluginContext) -> None:
 
         Creates a catalog with the ERMrest system schema only. No DerivaML
         schema is initialized; further schema setup is the caller's responsibility.
-        If schema_name is provided, that schema is created inside the new catalog.
+        If initial_schema is provided, that schema is created inside the new catalog.
 
         Args:
             hostname: Hostname of the DERIVA server.
-            schema_name: Optional schema to create inside the new catalog.
-            schema_comment: Description for the initial schema (optional).
+            initial_schema: Optional name for a schema to create inside the new catalog.
+            initial_schema_comment: Description for the initial schema (optional).
             name: Human-readable name for the catalog (optional).
             description: Description of the catalog (optional).
             catalog_id: Desired catalog ID string (optional; server assigns one if omitted).
@@ -480,22 +488,22 @@ def register(ctx: PluginContext) -> None:
                 )
                 catalog_id = str(catalog.catalog_id)
                 created_schema = None
-                if schema_name:
+                if initial_schema:
                     model = catalog.getCatalogModel()
                     model.create_schema(
-                        {"schema_name": schema_name, "comment": schema_comment}
+                        {"schema_name": initial_schema, "comment": initial_schema_comment}
                     )
-                    created_schema = schema_name
+                    created_schema = initial_schema
             audit_event(
                 "catalog_create",
                 hostname=hostname,
                 catalog_id=catalog_id,
                 name=name,
-                schema_name=schema_name,
+                initial_schema=initial_schema,
             )
             result: dict = {"status": "created", "hostname": hostname, "catalog_id": catalog_id}
             if created_schema:
-                result["schema_name"] = created_schema
+                result["initial_schema"] = created_schema
             return json.dumps(result)
         except Exception as exc:
             logger.error("create_catalog failed: %s", exc)
@@ -619,6 +627,103 @@ def register(ctx: PluginContext) -> None:
                 error_type=type(exc).__name__,
             )
             return json.dumps({"error": fmt_exc(exc)})
+
+    @ctx.tool(mutates=True)
+    async def clone_catalog_async(
+        hostname: str,
+        source_catalog_id: str,
+        dest_catalog_id: str | None = None,
+        copy_data: bool = True,
+        copy_annotations: bool = True,
+        copy_policy: bool = True,
+        exclude_schemas: list[str] | None = None,
+        name: str | None = None,
+        description: str | None = None,
+    ) -> str:
+        """Submit a catalog clone as a background task. Returns task_id immediately.
+
+        Use get_task_status(task_id) to poll for completion. The clone runs in a
+        background thread so it does not block the server. For small catalogs,
+        prefer clone_catalog (synchronous) to avoid the polling overhead.
+
+        Args:
+            hostname: Hostname of the DERIVA server.
+            source_catalog_id: Catalog ID to clone from.
+            dest_catalog_id: Destination catalog ID. If omitted, a new catalog is created.
+            copy_data: Copy table row data (default True).
+            copy_annotations: Copy catalog and table annotations (default True).
+            copy_policy: Copy ACL policies (default True).
+            exclude_schemas: Schema names to skip during cloning (optional).
+            name: Human-readable name for the destination catalog (optional).
+            description: Description for the destination catalog (optional).
+        """
+        internal = _remap(hostname)
+        # Capture principal at submission time for audit events inside the task.
+        principal = get_request_user_id()
+        # Mutable ref so the inner coroutine can read the task_id once assigned.
+        # Safe under asyncio cooperative scheduling: task_id_ref is populated
+        # before the event loop yields control to the background task.
+        task_id_ref: list[str] = []
+
+        async def _do_clone() -> dict:
+            task_id = task_id_ref[0]
+            mgr = get_task_manager()
+            cred = await mgr.get_credential(task_id)
+
+            def _run_sync() -> str:
+                server = DerivaServer("https", internal, credentials=cred)
+                src_catalog = server.connect_ermrest(source_catalog_id)
+                dst_properties: dict = {}
+                if name:
+                    dst_properties["name"] = name
+                if description:
+                    dst_properties["description"] = description
+                if dest_catalog_id:
+                    dst_catalog = server.connect_ermrest(dest_catalog_id)
+                else:
+                    dst_catalog = None
+                result_catalog = src_catalog.clone_catalog(
+                    dst_catalog=dst_catalog,
+                    copy_data=copy_data,
+                    copy_annotations=copy_annotations,
+                    copy_policy=copy_policy,
+                    truncate_after=True,
+                    exclude_schemas=exclude_schemas or [],
+                    dst_properties=dst_properties or None,
+                )
+                return str(result_catalog.catalog_id)
+
+            new_catalog_id = await asyncio.to_thread(_run_sync)
+            audit_event(
+                "catalog_clone",
+                hostname=hostname,
+                source_catalog_id=source_catalog_id,
+                dest_catalog_id=new_catalog_id,
+                principal=principal,
+            )
+            return {
+                "status": "cloned",
+                "hostname": hostname,
+                "source_catalog_id": source_catalog_id,
+                "dest_catalog_id": new_catalog_id,
+            }
+
+        try:
+            task_id = ctx.submit_task(
+                _do_clone(),
+                name=f"clone_catalog {source_catalog_id}",
+            )
+            task_id_ref.append(task_id)
+        except Exception as exc:
+            logger.error("clone_catalog_async failed to submit: %s", exc)
+            return json.dumps({"error": fmt_exc(exc)})
+        audit_event(
+            "catalog_clone_async_submitted",
+            hostname=hostname,
+            source_catalog_id=source_catalog_id,
+            task_id=task_id,
+        )
+        return json.dumps({"task_id": task_id, "status": "submitted"})
 
     @ctx.tool(mutates=True)
     async def create_catalog_alias(

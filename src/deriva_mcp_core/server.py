@@ -34,8 +34,9 @@ from .context import _set_stdio_credential_fn, _set_token_cache, init_hostname_m
 from .plugin.api import PluginContext, _set_plugin_context
 from .plugin.loader import load_plugins
 from .rag import register as _register_rag
+from .tasks.manager import TaskManager, _set_task_manager
 from .telemetry import init_audit_logger
-from .tools import annotation, catalog, entity, hatrac, query, schema, vocabulary
+from .tools import annotation, catalog, entity, hatrac, query, schema, tasks, vocabulary
 
 logger = logging.getLogger(__name__)
 
@@ -146,10 +147,14 @@ def create_server(
             streamable_http_path="/",
             stateless_http=True,
         )
+        task_manager = TaskManager(token_cache=token_cache)
     else:
         # stdio: read per-hostname credentials from local disk at call time
         _set_stdio_credential_fn(_get_credential)
         mcp = FastMCP("deriva-mcp-core")
+        task_manager = TaskManager(token_cache=None)
+
+    _set_task_manager(task_manager)
 
     # Health endpoint -- no auth, suitable for Docker health probes
     @mcp.custom_route("/health", methods=["GET"])
@@ -161,10 +166,11 @@ def create_server(
         mcp,
         disable_mutating_tools=cfg.disable_mutating_tools,
         mutation_required_claim=cfg.mutation_required_claim,
+        task_manager=task_manager,
     )
     _set_plugin_context(ctx)
 
-    for module in [catalog, entity, query, hatrac, vocabulary, annotation, schema]:
+    for module in [catalog, entity, query, hatrac, vocabulary, annotation, schema, tasks]:
         module.register(ctx)
 
     _register_rag(ctx, env_file=env_file)

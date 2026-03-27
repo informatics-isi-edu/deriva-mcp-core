@@ -260,6 +260,21 @@ class TestRagUpdateDocs:
         assert "deriva-py-docs" in result["updated"]
         assert len(result["updated"]) == 1
 
+    async def test_force_false_calls_ingest_with_force_false(self, ctx, mock_store):
+        tools, docs_mgr = _register_rag(ctx, mock_store)
+        await tools["rag_update_docs"]("deriva-py-docs")
+        docs_mgr.ingest.assert_called_once()
+        _, kwargs = docs_mgr.ingest.call_args
+        assert kwargs.get("force") is False
+
+    async def test_force_true_calls_ingest_with_force_true(self, ctx, mock_store):
+        tools, docs_mgr = _register_rag(ctx, mock_store)
+        result = json.loads(await tools["rag_update_docs"]("deriva-py-docs", force=True))
+        assert "updated" in result
+        docs_mgr.ingest.assert_called_once()
+        _, kwargs = docs_mgr.ingest.call_args
+        assert kwargs.get("force") is True
+
 
 # ---------------------------------------------------------------------------
 # Tests: rag_status

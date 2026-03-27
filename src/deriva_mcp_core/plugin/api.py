@@ -49,11 +49,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ..context import is_mutation_allowed
+from ..context import get_request_bearer_token, get_request_user_id, is_mutation_allowed
 from ..telemetry import audit_event
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
+    from ..tasks.manager import TaskManager
 
 logger = logging.getLogger(__name__)
 
@@ -94,10 +95,12 @@ class PluginContext:
         mcp: FastMCP,
         disable_mutating_tools: bool = False,
         mutation_required_claim: dict[str, Any] | None = None,
+        task_manager: TaskManager | None = None,
     ) -> None:
         self._mcp = mcp
         self._disable_mutating_tools = disable_mutating_tools
         self._mutation_required_claim = mutation_required_claim
+        self._task_manager = task_manager
         self._catalog_connect_hooks: list[Callable[..., Any]] = []
         self._schema_change_hooks: list[Callable[..., Any]] = []
         self._rag_sources: list[RagSourceDeclaration] = []
@@ -179,6 +182,48 @@ class PluginContext:
         callback signature: async (hostname, catalog_id) -> None
         """
         self._schema_change_hooks.append(callback)
+
+    # ------------------------------------------------------------------
+    # Background task submission
+    # ------------------------------------------------------------------
+
+    def submit_task(
+        self,
+        coroutine: Any,
+        name: str,
+        description: str = "",
+    ) -> str:
+        """Submit a coroutine as a background task and return its task_id immediately.
+
+        Must be called from within a tool handler (async context). Captures the
+        current principal and bearer token from contextvars so the task can
+        re-exchange credentials if needed.
+
+        Args:
+            coroutine: Awaitable to run as the task body.
+            name: Short human-readable task name.
+            description: Optional longer description.
+
+        Returns:
+            task_id string (UUID4). Pass to get_task_status / cancel_task.
+
+        Raises:
+            RuntimeError: If the TaskManager was not injected at startup.
+        """
+        if self._task_manager is None:
+            raise RuntimeError(
+                "TaskManager not configured. "
+                "Ensure create_server() initializes the task manager before plugins load."
+            )
+        principal = get_request_user_id()
+        bearer_token = get_request_bearer_token()
+        return self._task_manager.submit(
+            coroutine,
+            name=name,
+            principal=principal,
+            bearer_token=bearer_token,
+            description=description,
+        )
 
     # ------------------------------------------------------------------
     # RAG source declaration

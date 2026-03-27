@@ -39,6 +39,14 @@ _mutation_allowed: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "mutation_allowed", default=True
 )
 
+# Per-request original bearer token (the MCP bearer token from the Authorization
+# header). Set alongside _current_credential in HTTP mode. Used by TaskManager to
+# re-exchange for a fresh derived token when a background task outlives one derived
+# token window (30 minutes). None in stdio mode.
+_current_bearer_token: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_bearer_token", default=None
+)
+
 
 def set_current_credential(credential: dict) -> None:
     """Set the credential for the current request context.
@@ -56,6 +64,25 @@ def set_current_user_id(user_id: str) -> None:
     Not intended for use in tool or resource handlers.
     """
     _current_user_id.set(user_id)
+
+
+def set_current_bearer_token(token: str) -> None:
+    """Set the original MCP bearer token for the current request context.
+
+    Called by the auth verifier (HTTP) so that TaskManager can re-exchange for
+    a fresh derived token when a background task outlives one derived token window.
+    Not intended for use in tool or resource handlers.
+    """
+    _current_bearer_token.set(token)
+
+
+def get_request_bearer_token() -> str | None:
+    """Return the original MCP bearer token for the current request context.
+
+    Returns None in stdio mode. Used by ctx.submit_task() to capture the bearer
+    token at submission time so background tasks can re-exchange credentials.
+    """
+    return _current_bearer_token.get()
 
 
 def set_mutation_allowed(allowed: bool) -> None:
