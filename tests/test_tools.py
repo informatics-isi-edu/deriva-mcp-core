@@ -270,6 +270,318 @@ class TestCatalogTools:
         assert result["foreign_keys"][0]["columns"] == ["DatasetType"]
         assert result["foreign_keys"][0]["references"] == "vocab:DatasetType"
 
+    # -- resolve_snaptime --
+
+    async def test_resolve_snaptime_already_snaptime(self, ctx, mock_catalog):
+        tools = self._register(ctx)
+        mock_catalog.get.side_effect = None
+        mock_catalog.get.return_value.json.return_value = {"snaptime": "2TA-YA2D-ZDWY"}
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["resolve_snaptime"]("2TA-YA2D-ZDWY", "h", "1")
+            )
+        assert result["snaptime"] == "2TA-YA2D-ZDWY"
+        assert result["canonical"] is True
+
+    async def test_resolve_snaptime_no_catalog_roundtrip(self, ctx):
+        tools = self._register(ctx)
+        result = json.loads(
+            await tools["resolve_snaptime"]("2024-01-15T00:00:00Z")
+        )
+        assert "snaptime" in result
+        assert result["canonical"] is False
+
+    async def test_resolve_snaptime_rejects_plain_date(self, ctx):
+        tools = self._register(ctx)
+        result = json.loads(
+            await tools["resolve_snaptime"]("2022-05-12")
+        )
+        # Plain ISO date has no Crockford letters so it should be parsed as a
+        # datetime and converted, not treated as an existing snaptime.
+        assert "snaptime" in result
+        assert result["canonical"] is False
+
+    # -- get_catalog_history_bounds --
+
+    async def test_get_catalog_history_bounds(self, ctx, mock_catalog):
+        tools = self._register(ctx)
+        mock_catalog.get.side_effect = None
+        mock_catalog.get.return_value.json.return_value = {
+            "snaprange": ["2TA-YA2D-0000", "2TA-YA2D-ZDWY"],
+            "amendver": None,
+        }
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["get_catalog_history_bounds"]("h", "1")
+            )
+        assert result["earliest_snaptime"] == "2TA-YA2D-0000"
+        assert result["latest_snaptime"] == "2TA-YA2D-ZDWY"
+        assert result["amendver"] is None
+
+    async def test_resolve_snaptime_error(self, ctx, mock_catalog):
+        mock_catalog.get.side_effect = RuntimeError("network error")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["resolve_snaptime"]("2TA-YA2D-ZDWY", "h", "1")
+            )
+        assert "error" in result
+
+    async def test_get_catalog_history_bounds_error(self, ctx, mock_catalog):
+        mock_catalog.get.side_effect = RuntimeError("forbidden")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["get_catalog_history_bounds"]("h", "1")
+            )
+        assert "error" in result
+
+    # -- delete_catalog --
+
+    async def test_delete_catalog(self, ctx, mock_catalog):
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.catalog.audit_event"
+        ) as mock_audit:
+            result = json.loads(await tools["delete_catalog"]("h", "1"))
+        assert result["status"] == "deleted"
+        mock_catalog.delete_ermrest_catalog.assert_called_once_with(really=True)
+        assert mock_audit.call_args[0][0] == "catalog_delete"
+
+    async def test_delete_catalog_error_emits_audit(self, ctx, mock_catalog):
+        mock_catalog.delete_ermrest_catalog.side_effect = RuntimeError("forbidden")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.catalog.audit_event"
+        ) as mock_audit:
+            result = json.loads(await tools["delete_catalog"]("h", "1"))
+        assert "error" in result
+        assert mock_audit.call_args[0][0] == "catalog_delete_failed"
+
+    # -- clone_catalog --
+
+    async def test_clone_catalog(self, ctx, mock_catalog):
+        mock_clone_result = MagicMock()
+        mock_clone_result.catalog_id = "99"
+        mock_catalog.clone_catalog.return_value = mock_clone_result
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.catalog.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["clone_catalog"]("h", "1", dest_catalog_id=None)
+            )
+        assert result["status"] == "cloned"
+        assert result["dest_catalog_id"] == "99"
+        assert mock_audit.call_args[0][0] == "catalog_clone"
+
+    async def test_clone_catalog_with_options(self, ctx, mock_catalog):
+        mock_clone_result = MagicMock()
+        mock_clone_result.catalog_id = "77"
+        mock_catalog.clone_catalog.return_value = mock_clone_result
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.catalog.audit_event"
+        ):
+            result = json.loads(
+                await tools["clone_catalog"](
+                    "h", "1",
+                    dest_catalog_id="77",
+                    name="My Clone",
+                    description="A test clone",
+                )
+            )
+        assert result["status"] == "cloned"
+        assert result["dest_catalog_id"] == "77"
+        # dest_catalog_id provided -- get_catalog called twice (src + dst)
+        assert mock_catalog.clone_catalog.call_args[1]["dst_catalog"] is not None
+
+    async def test_clone_catalog_error_emits_audit(self, ctx, mock_catalog):
+        mock_catalog.clone_catalog.side_effect = RuntimeError("clone failed")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.catalog.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["clone_catalog"]("h", "1")
+            )
+        assert "error" in result
+        assert mock_audit.call_args[0][0] == "catalog_clone_failed"
+
+    # -- create_catalog_alias / update_catalog_alias / delete_catalog_alias --
+
+    async def test_create_catalog_alias(self, ctx, mock_catalog):
+        tools = self._register(ctx)
+        mock_server = MagicMock()
+        with self._patch_server(mock_catalog), \
+             patch("deriva_mcp_core.tools.catalog.DerivaServer", return_value=mock_server), \
+             patch("deriva_mcp_core.tools.catalog.get_request_credential", return_value={}), \
+             patch("deriva_mcp_core.tools.catalog.audit_event") as mock_audit:
+            result = json.loads(
+                await tools["create_catalog_alias"]("h", "my-alias", "1")
+            )
+        assert result["status"] == "created"
+        assert result["alias_name"] == "my-alias"
+        mock_server.create_ermrest_alias.assert_called_once()
+        assert mock_audit.call_args[0][0] == "catalog_alias_create"
+
+    async def test_create_catalog_alias_error(self, ctx, mock_catalog):
+        tools = self._register(ctx)
+        mock_server = MagicMock()
+        mock_server.create_ermrest_alias.side_effect = RuntimeError("conflict")
+        with self._patch_server(mock_catalog), \
+             patch("deriva_mcp_core.tools.catalog.DerivaServer", return_value=mock_server), \
+             patch("deriva_mcp_core.tools.catalog.get_request_credential", return_value={}), \
+             patch("deriva_mcp_core.tools.catalog.audit_event") as mock_audit:
+            result = json.loads(
+                await tools["create_catalog_alias"]("h", "my-alias", "1")
+            )
+        assert "error" in result
+        assert mock_audit.call_args[0][0] == "catalog_alias_create_failed"
+
+    async def test_update_catalog_alias(self, ctx, mock_catalog):
+        tools = self._register(ctx)
+        mock_server = MagicMock()
+        with self._patch_server(mock_catalog), \
+             patch("deriva_mcp_core.tools.catalog.DerivaServer", return_value=mock_server), \
+             patch("deriva_mcp_core.tools.catalog.get_request_credential", return_value={}), \
+             patch("deriva_mcp_core.tools.catalog.audit_event") as mock_audit:
+            result = json.loads(
+                await tools["update_catalog_alias"]("h", "my-alias", alias_target="2")
+            )
+        assert result["status"] == "updated"
+        assert mock_audit.call_args[0][0] == "catalog_alias_update"
+
+    async def test_update_catalog_alias_missing_args(self, ctx, mock_catalog):
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["update_catalog_alias"]("h", "my-alias")
+            )
+        assert "error" in result
+
+    async def test_delete_catalog_alias(self, ctx, mock_catalog):
+        tools = self._register(ctx)
+        mock_server = MagicMock()
+        with self._patch_server(mock_catalog), \
+             patch("deriva_mcp_core.tools.catalog.DerivaServer", return_value=mock_server), \
+             patch("deriva_mcp_core.tools.catalog.get_request_credential", return_value={}), \
+             patch("deriva_mcp_core.tools.catalog.audit_event") as mock_audit:
+            result = json.loads(
+                await tools["delete_catalog_alias"]("h", "my-alias")
+            )
+        assert result["status"] == "deleted"
+        mock_server.connect_ermrest_alias.return_value.delete_ermrest_alias.assert_called_once()
+        assert mock_audit.call_args[0][0] == "catalog_alias_delete"
+
+    # -- cite --
+
+    async def test_cite_current(self, ctx, mock_catalog):
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["cite"]("h", "1", "isa", "Dataset", "2A-1234", current=True)
+            )
+        assert result["is_snapshot"] is False
+        assert "h/chaise/record/#1/isa:Dataset/RID=2A-1234" in result["url"]
+
+    async def test_cite_versioned(self, ctx, mock_catalog):
+        mock_catalog.latest_snapshot.return_value.snaptime = "2TA-YA2D-ZDWY"
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["cite"]("h", "1", "isa", "Dataset", "2A-1234")
+            )
+        assert result["is_snapshot"] is True
+        assert "@2TA-YA2D-ZDWY/" in result["url"]
+
+    # -- create_catalog --
+
+    async def test_create_catalog(self, ctx, mock_catalog):
+        tools = self._register(ctx)
+        mock_server = MagicMock()
+        mock_new_catalog = MagicMock()
+        mock_new_catalog.catalog_id = "42"
+        mock_server.create_ermrest_catalog.return_value = mock_new_catalog
+        with self._patch_server(mock_catalog), \
+             patch("deriva_mcp_core.tools.catalog.DerivaServer", return_value=mock_server), \
+             patch("deriva_mcp_core.tools.catalog.get_request_credential", return_value={}), \
+             patch("deriva_mcp_core.tools.catalog.audit_event") as mock_audit:
+            result = json.loads(
+                await tools["create_catalog"]("h")
+            )
+        assert result["status"] == "created"
+        assert result["catalog_id"] == "42"
+        assert mock_audit.call_args[0][0] == "catalog_create"
+
+    async def test_create_catalog_with_schema(self, ctx, mock_catalog):
+        tools = self._register(ctx)
+        mock_server = MagicMock()
+        mock_new_catalog = MagicMock()
+        mock_new_catalog.catalog_id = "43"
+        mock_server.create_ermrest_catalog.return_value = mock_new_catalog
+        with self._patch_server(mock_catalog), \
+             patch("deriva_mcp_core.tools.catalog.DerivaServer", return_value=mock_server), \
+             patch("deriva_mcp_core.tools.catalog.get_request_credential", return_value={}), \
+             patch("deriva_mcp_core.tools.catalog.audit_event"):
+            result = json.loads(
+                await tools["create_catalog"]("h", schema_name="myschema")
+            )
+        assert result["status"] == "created"
+        assert result["schema_name"] == "myschema"
+        mock_new_catalog.getCatalogModel.return_value.create_schema.call_count == 1
+
+    async def test_create_catalog_error(self, ctx, mock_catalog):
+        tools = self._register(ctx)
+        mock_server = MagicMock()
+        mock_server.create_ermrest_catalog.side_effect = RuntimeError("quota exceeded")
+        with self._patch_server(mock_catalog), \
+             patch("deriva_mcp_core.tools.catalog.DerivaServer", return_value=mock_server), \
+             patch("deriva_mcp_core.tools.catalog.get_request_credential", return_value={}), \
+             patch("deriva_mcp_core.tools.catalog.audit_event") as mock_audit:
+            result = json.loads(
+                await tools["create_catalog"]("h")
+            )
+        assert "error" in result
+        assert mock_audit.call_args[0][0] == "catalog_create_failed"
+
+    async def test_update_catalog_alias_error(self, ctx, mock_catalog):
+        tools = self._register(ctx)
+        mock_server = MagicMock()
+        mock_server.connect_ermrest_alias.return_value.update.side_effect = RuntimeError("not found")
+        with self._patch_server(mock_catalog), \
+             patch("deriva_mcp_core.tools.catalog.DerivaServer", return_value=mock_server), \
+             patch("deriva_mcp_core.tools.catalog.get_request_credential", return_value={}), \
+             patch("deriva_mcp_core.tools.catalog.audit_event") as mock_audit:
+            result = json.loads(
+                await tools["update_catalog_alias"]("h", "my-alias", alias_target="2")
+            )
+        assert "error" in result
+        assert mock_audit.call_args[0][0] == "catalog_alias_update_failed"
+
+    async def test_delete_catalog_alias_error(self, ctx, mock_catalog):
+        tools = self._register(ctx)
+        mock_server = MagicMock()
+        mock_server.connect_ermrest_alias.return_value.delete_ermrest_alias.side_effect = RuntimeError("forbidden")
+        with self._patch_server(mock_catalog), \
+             patch("deriva_mcp_core.tools.catalog.DerivaServer", return_value=mock_server), \
+             patch("deriva_mcp_core.tools.catalog.get_request_credential", return_value={}), \
+             patch("deriva_mcp_core.tools.catalog.audit_event") as mock_audit:
+            result = json.loads(
+                await tools["delete_catalog_alias"]("h", "my-alias")
+            )
+        assert "error" in result
+        assert mock_audit.call_args[0][0] == "catalog_alias_delete_failed"
+
+    async def test_cite_error(self, ctx, mock_catalog):
+        mock_catalog.latest_snapshot.side_effect = RuntimeError("snapshot failed")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["cite"]("h", "1", "isa", "Dataset", "2A-1234")
+            )
+        assert "error" in result
+
 
 # ---------------------------------------------------------------------------
 # entity tools
@@ -523,6 +835,64 @@ class TestQueryTools:
         called_url = mock_catalog.get.call_args[0][0]
         assert "/aggregate/isa:Dataset/cnt:=cnt(RID)" == called_url
 
+    async def test_query_aggregate_error(self, ctx, mock_catalog):
+        mock_catalog.get.side_effect = RuntimeError("bad path")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["query_aggregate"]("h", "1", "isa:Dataset", ["cnt:=cnt(RID)"])
+            )
+        assert "error" in result
+
+    async def test_count_table(self, ctx, mock_catalog):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [{"cnt": 7}]
+        mock_catalog.get.side_effect = None
+        mock_catalog.get.return_value = mock_resp
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["count_table"]("h", "1", "isa", "Dataset")
+            )
+        assert result["count"] == 7
+        assert result["schema"] == "isa"
+        assert result["table"] == "Dataset"
+
+    async def test_count_table_with_filters(self, ctx, mock_catalog):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = [{"cnt": 3}]
+        mock_catalog.get.side_effect = None
+        mock_catalog.get.return_value = mock_resp
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["count_table"]("h", "1", "isa", "Dataset", {"Status": "released"})
+            )
+        assert result["count"] == 3
+        called_url = mock_catalog.get.call_args[0][0]
+        assert "/Status=released/" in called_url
+
+    async def test_count_table_empty_result(self, ctx, mock_catalog):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = []
+        mock_catalog.get.side_effect = None
+        mock_catalog.get.return_value = mock_resp
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["count_table"]("h", "1", "isa", "Dataset")
+            )
+        assert result["count"] == 0
+
+    async def test_count_table_error(self, ctx, mock_catalog):
+        mock_catalog.get.side_effect = RuntimeError("timeout")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["count_table"]("h", "1", "isa", "Dataset")
+            )
+        assert "error" in result
+
 
 # ---------------------------------------------------------------------------
 # hatrac tools
@@ -588,6 +958,30 @@ class TestHatracTools:
         with self._patch_store(mock_store):
             result = json.loads(await tools["create_namespace"]("h", "/hatrac/new/ns/"))
         assert result["path"] == "/hatrac/new/ns/"
+
+    async def test_list_namespace_error(self, ctx, mock_store):
+        mock_store.get.side_effect = RuntimeError("namespace not found")
+        tools = self._register(ctx)
+        with self._patch_store(mock_store):
+            result = json.loads(await tools["list_namespace"]("h", "/hatrac/ns"))
+        assert "error" in result
+
+    async def test_get_object_metadata_error(self, ctx, mock_store):
+        mock_store.head.side_effect = RuntimeError("object not found")
+        tools = self._register(ctx)
+        with self._patch_store(mock_store):
+            result = json.loads(await tools["get_object_metadata"]("h", "/hatrac/ns/file.txt"))
+        assert "error" in result
+
+    async def test_create_namespace_error(self, ctx, mock_store):
+        mock_store.put.side_effect = RuntimeError("conflict")
+        tools = self._register(ctx)
+        with self._patch_store(mock_store), patch(
+            "deriva_mcp_core.tools.hatrac.audit_event"
+        ) as mock_audit:
+            result = json.loads(await tools["create_namespace"]("h", "/hatrac/new/ns"))
+        assert "error" in result
+        assert mock_audit.call_args[0][0] == "hatrac_create_namespace_failed"
 
 
 # ---------------------------------------------------------------------------
@@ -911,6 +1305,269 @@ class TestVocabularyTools:
         assert "error" in result
         mock_audit.assert_called_once()
         assert mock_audit.call_args[0][0] == "vocabulary_delete_term_failed"
+
+    # -- create_vocabulary --
+
+    async def test_create_vocabulary(self, ctx, mock_catalog, mock_model):
+        model, _, _ = mock_model
+        mock_new_table = MagicMock()
+        mock_new_table.name = "Species"
+        col_name, col_uri = MagicMock(), MagicMock()
+        col_name.name = "Name"
+        col_uri.name = "URI"
+        mock_new_table.columns = [col_name, col_uri]
+        model.schemas.__getitem__.return_value.create_table.return_value = mock_new_table
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.vocabulary.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["create_vocabulary"]("h", "1", "vocab", "Species", "Types of species")
+            )
+        assert result["status"] == "created"
+        assert result["vocabulary_name"] == "Species"
+        assert mock_audit.call_args[0][0] == "vocabulary_create_vocabulary"
+
+    async def test_create_vocabulary_error(self, ctx, mock_catalog, mock_model):
+        model, _, _ = mock_model
+        model.schemas.__getitem__.return_value.create_table.side_effect = RuntimeError("conflict")
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.vocabulary.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["create_vocabulary"]("h", "1", "vocab", "Species")
+            )
+        assert "error" in result
+        assert mock_audit.call_args[0][0] == "vocabulary_create_vocabulary_failed"
+
+    # -- add_synonym --
+
+    async def test_add_synonym_synonyms_invalid_json_string(self, ctx, mock_catalog):
+        """Synonyms stored as a non-parseable string fall back to empty list."""
+        mock_path = mock_catalog.getPathBuilder.return_value.schemas.__getitem__.return_value.tables.__getitem__.return_value
+        mock_path.filter.return_value = mock_path
+        mock_path.entities.return_value.fetch.return_value = [
+            {"RID": "1-AAA", "Name": "Brain", "Synonyms": "not-json!"}
+        ]
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.vocabulary.audit_event"
+        ):
+            result = json.loads(
+                await tools["add_synonym"]("h", "1", "vocab", "Tissue", "Brain", "encephalon")
+            )
+        # Falls back to [] then appends -- only "encephalon" in result
+        assert result["status"] == "updated"
+        assert result["synonyms"] == ["encephalon"]
+
+    async def test_add_synonym_synonyms_as_json_string(self, ctx, mock_catalog):
+        """Synonyms stored as a JSON string are parsed before appending."""
+        mock_path = mock_catalog.getPathBuilder.return_value.schemas.__getitem__.return_value.tables.__getitem__.return_value
+        mock_path.filter.return_value = mock_path
+        mock_path.entities.return_value.fetch.return_value = [
+            {"RID": "1-AAA", "Name": "Brain", "Synonyms": '["cerebrum"]'}
+        ]
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.vocabulary.audit_event"
+        ):
+            result = json.loads(
+                await tools["add_synonym"]("h", "1", "vocab", "Tissue", "Brain", "encephalon")
+            )
+        assert result["status"] == "updated"
+        assert "encephalon" in result["synonyms"]
+        assert "cerebrum" in result["synonyms"]
+
+    async def test_add_synonym_error(self, ctx, mock_catalog):
+        mock_catalog.getPathBuilder.side_effect = RuntimeError("connection lost")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.vocabulary.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["add_synonym"]("h", "1", "vocab", "Tissue", "Brain", "encephalon")
+            )
+        assert "error" in result
+        assert mock_audit.call_args[0][0] == "vocabulary_add_synonym_failed"
+
+    async def test_add_synonym(self, ctx, mock_catalog):
+        mock_path = mock_catalog.getPathBuilder.return_value.schemas.__getitem__.return_value.tables.__getitem__.return_value
+        mock_path.filter.return_value = mock_path
+        mock_path.entities.return_value.fetch.return_value = [
+            {"RID": "1-AAA", "Name": "Brain", "Synonyms": ["cerebrum"]}
+        ]
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.vocabulary.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["add_synonym"]("h", "1", "vocab", "Tissue", "Brain", "encephalon")
+            )
+        assert result["term_name"] == "Brain"
+        assert "encephalon" in result["synonyms"]
+        assert mock_audit.call_args[0][0] == "vocabulary_add_synonym"
+
+    async def test_add_synonym_already_present(self, ctx, mock_catalog):
+        mock_path = mock_catalog.getPathBuilder.return_value.schemas.__getitem__.return_value.tables.__getitem__.return_value
+        mock_path.filter.return_value = mock_path
+        mock_path.entities.return_value.fetch.return_value = [
+            {"RID": "1-AAA", "Name": "Brain", "Synonyms": ["cerebrum"]}
+        ]
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.vocabulary.audit_event"
+        ):
+            result = json.loads(
+                await tools["add_synonym"]("h", "1", "vocab", "Tissue", "Brain", "cerebrum")
+            )
+        # Already present -- no update, synonym count unchanged
+        assert result["synonyms"] == ["cerebrum"]
+
+    async def test_add_synonym_term_not_found(self, ctx, mock_catalog):
+        mock_path = mock_catalog.getPathBuilder.return_value.schemas.__getitem__.return_value.tables.__getitem__.return_value
+        mock_path.filter.return_value = mock_path
+        mock_path.entities.return_value.fetch.return_value = []
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["add_synonym"]("h", "1", "vocab", "Tissue", "NoSuchTerm", "x")
+            )
+        assert "error" in result
+
+    # -- remove_synonym --
+
+    async def test_remove_synonym(self, ctx, mock_catalog):
+        mock_path = mock_catalog.getPathBuilder.return_value.schemas.__getitem__.return_value.tables.__getitem__.return_value
+        mock_path.filter.return_value = mock_path
+        mock_path.entities.return_value.fetch.return_value = [
+            {"RID": "1-AAA", "Name": "Brain", "Synonyms": ["cerebrum", "encephalon"]}
+        ]
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.vocabulary.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["remove_synonym"]("h", "1", "vocab", "Tissue", "Brain", "cerebrum")
+            )
+        assert "cerebrum" not in result["synonyms"]
+        assert "encephalon" in result["synonyms"]
+        assert mock_audit.call_args[0][0] == "vocabulary_remove_synonym"
+
+    async def test_remove_synonym_not_present(self, ctx, mock_catalog):
+        # "No error if the synonym is not in the list" -- returns success with unchanged list
+        mock_path = mock_catalog.getPathBuilder.return_value.schemas.__getitem__.return_value.tables.__getitem__.return_value
+        mock_path.filter.return_value = mock_path
+        mock_path.entities.return_value.fetch.return_value = [
+            {"RID": "1-AAA", "Name": "Brain", "Synonyms": ["cerebrum"]}
+        ]
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.vocabulary.audit_event"
+        ):
+            result = json.loads(
+                await tools["remove_synonym"]("h", "1", "vocab", "Tissue", "Brain", "nosuchsynonym")
+            )
+        assert result["status"] == "updated"
+        assert result["synonyms"] == ["cerebrum"]
+
+    async def test_remove_synonym_synonyms_invalid_json_string(self, ctx, mock_catalog):
+        """Synonyms stored as a non-parseable string fall back to empty list."""
+        mock_path = mock_catalog.getPathBuilder.return_value.schemas.__getitem__.return_value.tables.__getitem__.return_value
+        mock_path.filter.return_value = mock_path
+        mock_path.entities.return_value.fetch.return_value = [
+            {"RID": "1-AAA", "Name": "Brain", "Synonyms": "not-json!"}
+        ]
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.vocabulary.audit_event"
+        ):
+            result = json.loads(
+                await tools["remove_synonym"]("h", "1", "vocab", "Tissue", "Brain", "cerebrum")
+            )
+        # Falls back to [] -- nothing to remove, result is empty list
+        assert result["status"] == "updated"
+        assert result["synonyms"] == []
+
+    async def test_remove_synonym_synonyms_as_json_string(self, ctx, mock_catalog):
+        """Synonyms stored as a JSON string are parsed before removal."""
+        mock_path = mock_catalog.getPathBuilder.return_value.schemas.__getitem__.return_value.tables.__getitem__.return_value
+        mock_path.filter.return_value = mock_path
+        mock_path.entities.return_value.fetch.return_value = [
+            {"RID": "1-AAA", "Name": "Brain", "Synonyms": '["cerebrum", "encephalon"]'}
+        ]
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.vocabulary.audit_event"
+        ):
+            result = json.loads(
+                await tools["remove_synonym"]("h", "1", "vocab", "Tissue", "Brain", "cerebrum")
+            )
+        assert result["status"] == "updated"
+        assert "cerebrum" not in result["synonyms"]
+        assert "encephalon" in result["synonyms"]
+
+    async def test_remove_synonym_error(self, ctx, mock_catalog):
+        mock_catalog.getPathBuilder.side_effect = RuntimeError("connection lost")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.vocabulary.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["remove_synonym"]("h", "1", "vocab", "Tissue", "Brain", "cerebrum")
+            )
+        assert "error" in result
+        assert mock_audit.call_args[0][0] == "vocabulary_remove_synonym_failed"
+
+    # -- update_term_description --
+
+    async def test_update_term_description_tool(self, ctx, mock_catalog):
+        mock_path = mock_catalog.getPathBuilder.return_value.schemas.__getitem__.return_value.tables.__getitem__.return_value
+        mock_path.filter.return_value = mock_path
+        mock_path.entities.return_value.fetch.return_value = [
+            {"RID": "1-AAA", "Name": "Brain", "Description": "old description"}
+        ]
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.vocabulary.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["update_term_description"](
+                    "h", "1", "vocab", "Tissue", "Brain", "new description"
+                )
+            )
+        assert result["status"] == "updated"
+        assert result["schema"] == "vocab"
+        assert mock_audit.call_args[0][0] == "vocabulary_update_term_description"
+
+    async def test_update_term_description_tool_term_not_found(self, ctx, mock_catalog):
+        mock_path = mock_catalog.getPathBuilder.return_value.schemas.__getitem__.return_value.tables.__getitem__.return_value
+        mock_path.filter.return_value = mock_path
+        mock_path.entities.return_value.fetch.return_value = []
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["update_term_description"](
+                    "h", "1", "vocab", "Tissue", "NoSuchTerm", "desc"
+                )
+            )
+        assert "error" in result
+
+    async def test_update_term_description_tool_error(self, ctx, mock_catalog):
+        mock_catalog.getPathBuilder.side_effect = RuntimeError("connection lost")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.vocabulary.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["update_term_description"](
+                    "h", "1", "vocab", "Tissue", "Brain", "desc"
+                )
+            )
+        assert "error" in result
+        assert mock_audit.call_args[0][0] == "vocabulary_update_term_description_failed"
 
 
 # ---------------------------------------------------------------------------
@@ -1877,6 +2534,203 @@ class TestAnnotationTools:
         assert "error" in result
         mock_audit.assert_called_once()
         assert mock_audit.call_args[0][0] == "annotation_apply_navbar_failed"
+
+    # -- reorder tools --
+
+    async def test_reorder_visible_columns_by_index(self, ctx, mock_catalog, mock_model):
+        model, mock_table, _ = mock_model
+        _VC = "tag:isrd.isi.edu,2016:visible-columns"
+        mock_table.annotations = {_VC: {"compact": ["A", "B", "C"]}}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.annotation.fire_schema_change"
+        ), patch("deriva_mcp_core.tools.annotation.audit_event"):
+            result = json.loads(
+                await tools["reorder_visible_columns"](
+                    "h", "1", "public", "MyTable", "compact", [2, 0, 1]
+                )
+            )
+        assert result["status"] == "applied"
+        assert result["updated_list"] == ["C", "A", "B"]
+
+    async def test_reorder_visible_columns_direct(self, ctx, mock_catalog, mock_model):
+        model, mock_table, _ = mock_model
+        _VC = "tag:isrd.isi.edu,2016:visible-columns"
+        mock_table.annotations = {_VC: {"compact": ["A", "B"]}}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.annotation.fire_schema_change"
+        ), patch("deriva_mcp_core.tools.annotation.audit_event"):
+            result = json.loads(
+                await tools["reorder_visible_columns"](
+                    "h", "1", "public", "MyTable", "compact", ["X", "Y"]
+                )
+            )
+        assert result["status"] == "applied"
+        assert result["updated_list"] == ["X", "Y"]
+
+    async def test_reorder_visible_columns_error(self, ctx, mock_catalog):
+        mock_catalog.getCatalogModel.side_effect = RuntimeError("boom")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.annotation.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["reorder_visible_columns"](
+                    "h", "1", "public", "MyTable", "compact", [0, 1]
+                )
+            )
+        assert "error" in result
+        mock_audit.assert_called_once()
+        assert mock_audit.call_args[0][0] == "annotation_reorder_visible_columns_failed"
+
+    async def test_reorder_visible_foreign_keys_by_index(self, ctx, mock_catalog, mock_model):
+        model, mock_table, _ = mock_model
+        _VFK = "tag:isrd.isi.edu,2016:visible-foreign-keys"
+        mock_table.annotations = {_VFK: {"detailed": ["fk1", "fk2", "fk3"]}}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.annotation.fire_schema_change"
+        ), patch("deriva_mcp_core.tools.annotation.audit_event"):
+            result = json.loads(
+                await tools["reorder_visible_foreign_keys"](
+                    "h", "1", "public", "MyTable", "detailed", [2, 1, 0]
+                )
+            )
+        assert result["status"] == "applied"
+        assert result["updated_list"] == ["fk3", "fk2", "fk1"]
+
+    async def test_reorder_visible_foreign_keys_direct(self, ctx, mock_catalog, mock_model):
+        model, mock_table, _ = mock_model
+        _VFK = "tag:isrd.isi.edu,2016:visible-foreign-keys"
+        mock_table.annotations = {_VFK: {}}
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.annotation.fire_schema_change"
+        ), patch("deriva_mcp_core.tools.annotation.audit_event"):
+            result = json.loads(
+                await tools["reorder_visible_foreign_keys"](
+                    "h", "1", "public", "MyTable", "*", [["s", "fk_col"]]
+                )
+            )
+        assert result["status"] == "applied"
+        assert result["updated_list"] == [["s", "fk_col"]]
+
+    async def test_reorder_visible_foreign_keys_error(self, ctx, mock_catalog):
+        mock_catalog.getCatalogModel.side_effect = RuntimeError("boom")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.annotation.audit_event"
+        ) as mock_audit:
+            result = json.loads(
+                await tools["reorder_visible_foreign_keys"](
+                    "h", "1", "public", "MyTable", "*", [0]
+                )
+            )
+        assert "error" in result
+        mock_audit.assert_called_once()
+        assert mock_audit.call_args[0][0] == "annotation_reorder_visible_foreign_keys_failed"
+
+    # -- sample data and template tools --
+
+    async def test_get_table_sample_data(self, ctx, mock_catalog):
+        mock_catalog.get.side_effect = None
+        mock_catalog.get.return_value.json.return_value = [
+            {"RID": "1-0001", "Name": "Alpha"},
+            {"RID": "1-0002", "Name": "Beta"},
+        ]
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["get_table_sample_data"]("h", "1", "public", "MyTable", 2)
+            )
+        assert result["count"] == 2
+        assert result["rows"][0]["Name"] == "Alpha"
+        assert result["schema"] == "public"
+        assert result["table"] == "MyTable"
+
+    async def test_get_table_sample_data_clamps_limit(self, ctx, mock_catalog):
+        mock_catalog.get.side_effect = None
+        mock_catalog.get.return_value.json.return_value = []
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            await tools["get_table_sample_data"]("h", "1", "public", "MyTable", 100)
+        called_url = mock_catalog.get.call_args[0][0]
+        assert "limit=10" in called_url
+
+    async def test_get_table_sample_data_error(self, ctx, mock_catalog):
+        mock_catalog.get.side_effect = RuntimeError("query failed")
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            result = json.loads(
+                await tools["get_table_sample_data"]("h", "1", "public", "MyTable")
+            )
+        assert "error" in result
+
+    async def test_preview_handlebars_template(self, ctx):
+        tools = self._register(ctx)
+        chevron_mock = MagicMock()
+        chevron_mock.render.return_value = "Hello World"
+        with patch.dict("sys.modules", {"chevron": chevron_mock}):
+            result = json.loads(
+                await tools["preview_handlebars_template"](
+                    "Hello {{name}}", {"name": "World"}
+                )
+            )
+        assert result["rendered"] == "Hello World"
+
+    async def test_preview_handlebars_template_no_chevron(self, ctx):
+        tools = self._register(ctx)
+        with patch.dict("sys.modules", {"chevron": None}):
+            result = json.loads(
+                await tools["preview_handlebars_template"]("{{foo}}", {})
+            )
+        assert "error" in result
+        assert "chevron" in result["error"]
+
+    async def test_preview_handlebars_template_render_error(self, ctx):
+        tools = self._register(ctx)
+        chevron_mock = MagicMock()
+        chevron_mock.render.side_effect = ValueError("bad template")
+        with patch.dict("sys.modules", {"chevron": chevron_mock}):
+            result = json.loads(
+                await tools["preview_handlebars_template"]("{{#bad}}", {})
+            )
+        assert "error" in result
+
+    async def test_validate_template_syntax_valid(self, ctx):
+        tools = self._register(ctx)
+        chevron_mock = MagicMock()
+        chevron_mock.render.return_value = ""
+        with patch.dict("sys.modules", {"chevron": chevron_mock}):
+            result = json.loads(
+                await tools["validate_template_syntax"]("{{name}} is {{age}}")
+            )
+        assert result["valid"] is True
+
+    async def test_validate_template_syntax_invalid(self, ctx):
+        tools = self._register(ctx)
+        chevron_mock = MagicMock()
+        chevron_mock.render.side_effect = ValueError("unclosed block")
+        with patch.dict("sys.modules", {"chevron": chevron_mock}):
+            result = json.loads(
+                await tools["validate_template_syntax"]("{{#section}}")
+            )
+        assert result["valid"] is False
+        assert "unclosed block" in result["errors"][0]
+
+    async def test_validate_template_syntax_no_chevron(self, ctx):
+        tools = self._register(ctx)
+        with patch.dict("sys.modules", {"chevron": None}):
+            result = json.loads(
+                await tools["validate_template_syntax"]("{{name}}")
+            )
+        assert "error" in result
+        assert "chevron" in result["error"]
 
 
 # ---------------------------------------------------------------------------
