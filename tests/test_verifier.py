@@ -7,9 +7,9 @@ import time
 
 from deriva_mcp_core.auth.introspect_cache import IntrospectionCache
 from deriva_mcp_core.auth.token_cache import DerivedTokenCache
-from deriva_mcp_core.auth.verifier import CredenzaTokenVerifier
+from deriva_mcp_core.auth.verifier import CredenzaTokenVerifier, _satisfies_claim_spec
 from deriva_mcp_core.config import Settings
-from deriva_mcp_core.context import _current_credential, _current_user_id
+from deriva_mcp_core.context import _current_credential, _current_user_id, _mutation_allowed
 
 _TOKEN = "mcp-bearer-token"
 _SUB = "user@example.org"
@@ -178,3 +178,122 @@ async def test_verify_token_exchange_failure_returns_none(httpx_mock, test_setti
     httpx_mock.add_response(url=_token_url(test_settings), status_code=400)
     result = await _make_verifier(test_settings).verify_token(_TOKEN)
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Mutation claim: _satisfies_claim_spec unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_claim_spec_list_required_list_actual_match():
+    assert _satisfies_claim_spec(
+        {"groups": ["deriva-mcp-mutator", "users"]},
+        {"groups": ["deriva-mcp-mutator"]},
+    )
+
+
+def test_claim_spec_list_required_list_actual_no_match():
+    assert not _satisfies_claim_spec(
+        {"groups": ["users"]},
+        {"groups": ["deriva-mcp-mutator"]},
+    )
+
+
+def test_claim_spec_list_required_scalar_actual_match():
+    assert _satisfies_claim_spec(
+        {"role": "admin"},
+        {"role": ["admin", "user"]},
+    )
+
+
+def test_claim_spec_list_required_scalar_actual_no_match():
+    assert not _satisfies_claim_spec(
+        {"role": "guest"},
+        {"role": ["admin", "user"]},
+    )
+
+
+def test_claim_spec_scalar_required_scalar_actual_match():
+    assert _satisfies_claim_spec({"mcp_can_mutate": True}, {"mcp_can_mutate": True})
+
+
+def test_claim_spec_scalar_required_scalar_actual_no_match():
+    assert not _satisfies_claim_spec({"mcp_can_mutate": False}, {"mcp_can_mutate": True})
+
+
+def test_claim_spec_missing_claim_returns_false():
+    assert not _satisfies_claim_spec({}, {"groups": ["deriva-mcp-mutator"]})
+
+
+def test_claim_spec_multiple_keys_all_must_match():
+    payload = {"groups": ["mcp-mutator"], "tier": "premium"}
+    assert _satisfies_claim_spec(payload, {"groups": ["mcp-mutator"], "tier": "premium"})
+    assert not _satisfies_claim_spec(payload, {"groups": ["mcp-mutator"], "tier": "basic"})
+
+
+# ---------------------------------------------------------------------------
+# Mutation claim: verify_token sets _mutation_allowed contextvar
+# ---------------------------------------------------------------------------
+
+
+def _introspect_payload(**extra):
+    return {
+        "active": True,
+        "sub": _SUB,
+        "iss": _ISS,
+        "aud": ["urn:deriva:rest:service:mcp"],
+        "exp": _EXP,
+        **extra,
+    }
+
+
+async def test_verify_token_sets_mutation_allowed_true_when_claim_matches(
+    httpx_mock, test_settings
+):
+    settings = Settings(
+        **{**test_settings.model_dump(), "mutation_required_claim": {"groups": ["mcp-mutators"]}}
+    )
+    httpx_mock.add_response(
+        url=_introspect_url(settings),
+        json=_introspect_payload(groups=["mcp-mutators", "users"]),
+    )
+    httpx_mock.add_response(
+        url=_token_url(settings), json={"access_token": _DERIVED, "expires_in": 1800}
+    )
+    await CredenzaTokenVerifier(
+        settings, DerivedTokenCache(settings), IntrospectionCache(settings)
+    ).verify_token(_TOKEN)
+    assert _mutation_allowed.get() is True
+
+
+async def test_verify_token_sets_mutation_allowed_false_when_claim_missing(
+    httpx_mock, test_settings
+):
+    settings = Settings(
+        **{**test_settings.model_dump(), "mutation_required_claim": {"groups": ["mcp-mutators"]}}
+    )
+    httpx_mock.add_response(
+        url=_introspect_url(settings),
+        json=_introspect_payload(),  # no groups claim
+    )
+    httpx_mock.add_response(
+        url=_token_url(settings), json={"access_token": _DERIVED, "expires_in": 1800}
+    )
+    await CredenzaTokenVerifier(
+        settings, DerivedTokenCache(settings), IntrospectionCache(settings)
+    ).verify_token(_TOKEN)
+    assert _mutation_allowed.get() is False
+
+
+async def test_verify_token_sets_mutation_allowed_true_when_no_claim_configured(
+    httpx_mock, test_settings
+):
+    httpx_mock.add_response(
+        url=_introspect_url(test_settings),
+        json=_introspect_payload(),
+    )
+    httpx_mock.add_response(
+        url=_token_url(test_settings), json={"access_token": _DERIVED, "expires_in": 1800}
+    )
+    await _make_verifier(test_settings).verify_token(_TOKEN)
+    assert _mutation_allowed.get() is True

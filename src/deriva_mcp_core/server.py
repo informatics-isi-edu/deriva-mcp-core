@@ -157,7 +157,11 @@ def create_server(
         return JSONResponse({"status": "ok"})
 
     # Build the plugin context and register built-in tool modules
-    ctx = PluginContext(mcp, disable_mutating_tools=cfg.disable_mutating_tools)
+    ctx = PluginContext(
+        mcp,
+        disable_mutating_tools=cfg.disable_mutating_tools,
+        mutation_required_claim=cfg.mutation_required_claim,
+    )
     _set_plugin_context(ctx)
 
     for module in [catalog, entity, query, hatrac, vocabulary, annotation, schema]:
@@ -166,7 +170,7 @@ def create_server(
     _register_rag(ctx, env_file=env_file)
 
     # Discover and register external plugins (entry points)
-    load_plugins(ctx)
+    load_plugins(ctx, allowlist=cfg.plugin_allowlist)
 
     return mcp
 

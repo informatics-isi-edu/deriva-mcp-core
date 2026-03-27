@@ -11,20 +11,56 @@ On each request:
     2. verify_token() introspects the token via Credenza POST /introspect
     3. Validates the token is active and audience contains DERIVA_MCP_SERVER_RESOURCE
     4. Obtains a derived DERIVA-scoped token via the smart token cache (exchange on miss)
-    5. Sets the per-request credential contextvar for use by tool/resource handlers
+    5. Sets the per-request credential and mutation-allowed contextvars
     6. Returns an AccessToken; returning None causes FastMCP to issue a 401
 """
 import logging
+from typing import Any
+
 from mcp.server.auth.provider import AccessToken
+
 from .exchange import ExchangeError
 from .introspect import IntrospectionError, TokenInactiveError
 from .introspect_cache import IntrospectionCache
 from .token_cache import DerivedTokenCache
 from ..config import Settings
-from ..context import set_current_credential, set_current_user_id
+from ..context import set_current_credential, set_current_user_id, set_mutation_allowed
 from ..telemetry import audit_event
 
 logger = logging.getLogger(__name__)
+
+
+def _satisfies_claim_spec(payload: dict[str, Any], claim_spec: dict[str, Any]) -> bool:
+    """Return True if payload satisfies all entries in claim_spec.
+
+    Each key in claim_spec is a claim name; the value is the required scalar or
+    list of accepted values. Multiple keys use AND semantics (all must match).
+    List required values use OR semantics (any one match is sufficient).
+
+    Matching rules per entry:
+      - required is a list: actual must equal one of the required values, OR if
+        actual is itself a list, it must contain at least one required value.
+      - required is a scalar: actual must equal it, OR if actual is a list it
+        must contain the required value.
+    """
+    for claim_name, required in claim_spec.items():
+        actual = payload.get(claim_name)
+        if actual is None:
+            return False
+        if isinstance(required, list):
+            if isinstance(actual, list):
+                if not any(v in actual for v in required):
+                    return False
+            else:
+                if actual not in required:
+                    return False
+        else:
+            if isinstance(actual, list):
+                if required not in actual:
+                    return False
+            elif actual != required:
+                return False
+    return True
 
 
 class CredenzaTokenVerifier:
@@ -86,6 +122,14 @@ class CredenzaTokenVerifier:
         # Step 4: set the per-request credential and user identity.
         set_current_credential({"bearer-token": derived_token})
         set_current_user_id(principal)
+
+        # Step 5: evaluate mutation claim if configured.
+        claim_spec = self._settings.mutation_required_claim
+        if claim_spec is not None:
+            allowed = _satisfies_claim_spec(result.payload, claim_spec)
+            set_mutation_allowed(allowed)
+        else:
+            set_mutation_allowed(True)
 
         display = (
             result.payload.get("email") or result.payload.get("preferred_username") or result.sub

@@ -321,9 +321,11 @@ take precedence over the env file.
 
 **Safety:**
 
-| Variable                            | Required | Default | Description                                                                                                                                     |
-|-------------------------------------|----------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------|
-| `DERIVA_MCP_DISABLE_MUTATING_TOOLS` | No       | `true`  | Kill switch for all tools registered with `mutates=True`. Defaults to enabled -- operators must explicitly set `false` to allow catalog writes. |
+| Variable                             | Required | Default | Description                                                                                                                                                                                                                                                                 |
+|--------------------------------------|----------|---------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `DERIVA_MCP_DISABLE_MUTATING_TOOLS`  | No       | `true`  | Kill switch for all tools registered with `mutates=True`. Defaults to enabled -- operators must explicitly set `false` to allow catalog writes.                                                                                                                             |
+| `DERIVA_MCP_PLUGIN_ALLOWLIST`        | No       | --      | Comma-separated list of permitted plugin entry point names. If unset, all discovered plugins load. If set (including empty), only named plugins load; others are logged at WARNING and skipped. Example: `deriva-ml,my-org-plugin`                                          |
+| `DERIVA_MCP_MUTATION_REQUIRED_CLAIM` | No       | --      | JSON object specifying a token claim that must be satisfied for a principal to execute mutating tools (when kill switch is off). Keys are claim names; values are required scalars or lists (list = OR, multiple keys = AND). Example: `{"groups": ["deriva-mcp-mutator"]}` |
 
 **Audit logging:**
 
@@ -1297,6 +1299,53 @@ completed in the same commit window:
   so ordering is deterministic and pagination is cursor-based without switching tools.
 - `query_attribute` enhanced: `after_rid` and `limit` parameters added; `@sort(RID)@after(rid)`
   is appended after the column projection in the URL (required by ERMrest URL grammar).
+
+---
+
+### Phase 5.6.7 -- Security Hardening [DONE -- 2026-03-27]
+
+Two operator-configurable controls that harden the plugin and mutation surface without
+changing default behavior for existing deployments.
+
+#### Plugin allowlist (`DERIVA_MCP_PLUGIN_ALLOWLIST`)
+
+Entry-point discovery is open by default: any package installed in the server's Python
+environment that declares the `deriva_mcp.plugins` entry point is loaded automatically.
+This is convenient but means a compromised or malicious package can inject code by
+declaring the entry point -- with no second gate if hot-reload or automatic plugin
+activation were ever added.
+
+`DERIVA_MCP_PLUGIN_ALLOWLIST` (comma-separated entry point names) restricts loading to
+the named set. If unset, all discovered plugins load (existing behavior preserved). An
+explicitly empty value disables all external plugins. Skipped plugins are logged at
+`WARNING` so operators can audit what was blocked.
+
+Implementation: `load_plugins(ctx, allowlist)` in `plugin/loader.py`; `plugin_allowlist`
+field in `Settings`; wired through `create_server()`.
+
+#### Per-user mutation claim gating (`DERIVA_MCP_MUTATION_REQUIRED_CLAIM`)
+
+When the mutation kill switch is off, all authenticated users can execute mutating tools. This
+adds a finer-grained control: a JSON claim spec (e.g. `{"groups": ["deriva-mcp-mutator"]}`)
+that must be satisfied by the token introspection payload. Users whose token lacks the
+required claim receive `{"error": "catalog mutations are not permitted for your account"}`
+and a `mutation_claim_denied` audit event. The kill switch takes precedence when both
+are active. stdio mode is unaffected (`_mutation_allowed` defaults to `True`).
+
+Matching semantics: list required values use OR (any one match sufficient); multiple
+keys in the spec use AND (all must match). Handles scalar claims (`{"mcp_can_mutate": true}`),
+list claims (`{"groups": ["a", "b"]}`), and cross-type matching (scalar required vs.
+list actual and vice versa).
+
+Implementation: `_satisfies_claim_spec()` in `auth/verifier.py`; `_mutation_allowed`
+contextvar + `set_mutation_allowed()` / `is_mutation_allowed()` in `context.py`;
+`mutation_required_claim` field in `Settings`; `PluginContext.__init__` takes
+`mutation_required_claim`; guarded wrapper in `plugin/api.py` checks both kill switch
+and claim at call time; `create_server()` passes the setting through.
+
+Tests: 16 new tests across `test_verifier.py` (claim spec matching + contextvar setting)
+and `test_plugin.py` (guard behavior: allowed, denied, read tools unaffected, kill switch
+precedence, no-config fast path).
 
 ---
 

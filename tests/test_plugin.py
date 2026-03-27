@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from deriva_mcp_core.context import set_mutation_allowed
 from deriva_mcp_core.plugin.api import (
     PluginContext,
     RagSourceDeclaration,
@@ -245,3 +246,141 @@ def test_load_plugins_continues_after_failure(ctx):
         load_plugins(ctx)  # must not raise
 
     good_register.assert_called_once_with(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Plugin allowlist
+# ---------------------------------------------------------------------------
+
+
+def _make_eps(*names):
+    """Return a list of mock entry points with the given names."""
+    eps = []
+    for name in names:
+        ep = MagicMock()
+        ep.name = name
+        ep.value = f"{name}:register"
+        ep.load.return_value = MagicMock()
+        eps.append(ep)
+    return eps
+
+
+def test_allowlist_none_loads_all(ctx):
+    """allowlist=None loads every discovered plugin (default open behavior)."""
+    eps = _make_eps("plugin-a", "plugin-b")
+    with patch("deriva_mcp_core.plugin.loader.entry_points", return_value=eps):
+        load_plugins(ctx, allowlist=None)
+    eps[0].load.return_value.assert_called_once_with(ctx)
+    eps[1].load.return_value.assert_called_once_with(ctx)
+
+
+def test_allowlist_filters_to_named_plugins(ctx):
+    """allowlist restricts loading to the named entry points only."""
+    eps = _make_eps("allowed-plugin", "blocked-plugin")
+    with patch("deriva_mcp_core.plugin.loader.entry_points", return_value=eps):
+        load_plugins(ctx, allowlist=["allowed-plugin"])
+    eps[0].load.return_value.assert_called_once_with(ctx)
+    eps[1].load.return_value.assert_not_called()
+
+
+def test_allowlist_empty_loads_nothing(ctx):
+    """An empty allowlist disables all external plugins."""
+    eps = _make_eps("plugin-a", "plugin-b")
+    with patch("deriva_mcp_core.plugin.loader.entry_points", return_value=eps):
+        load_plugins(ctx, allowlist=[])
+    eps[0].load.return_value.assert_not_called()
+    eps[1].load.return_value.assert_not_called()
+
+
+def test_allowlist_unknown_name_is_ignored(ctx):
+    """A name in the allowlist that has no matching entry point is silently ignored."""
+    eps = _make_eps("real-plugin")
+    with patch("deriva_mcp_core.plugin.loader.entry_points", return_value=eps):
+        load_plugins(ctx, allowlist=["real-plugin", "nonexistent-plugin"])
+    eps[0].load.return_value.assert_called_once_with(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Mutation claim guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def ctx_with_claim(mcp):
+    return PluginContext(
+        mcp,
+        disable_mutating_tools=False,
+        mutation_required_claim={"groups": ["mcp-mutators"]},
+    )
+
+
+async def test_mutation_claim_allowed_when_contextvar_true(ctx_with_claim):
+    set_mutation_allowed(True)
+
+    @ctx_with_claim.tool(mutates=True)
+    async def write_tool():
+        return "ok"
+
+    result = await write_tool()
+    assert result == "ok"
+
+
+async def test_mutation_claim_denied_when_contextvar_false(ctx_with_claim):
+    set_mutation_allowed(False)
+
+    @ctx_with_claim.tool(mutates=True)
+    async def write_tool():
+        return "ok"
+
+    result = await write_tool()
+    assert "not permitted" in result
+
+
+async def test_mutation_claim_does_not_block_read_tools(ctx_with_claim):
+    set_mutation_allowed(False)
+
+    @ctx_with_claim.tool(mutates=False)
+    async def read_tool():
+        return "data"
+
+    result = await read_tool()
+    assert result == "data"
+
+
+async def test_killswitch_takes_precedence_over_claim(mcp):
+    ctx = PluginContext(
+        mcp,
+        disable_mutating_tools=True,
+        mutation_required_claim={"groups": ["mcp-mutators"]},
+    )
+    set_mutation_allowed(True)  # claim would pass, but killswitch wins
+
+    @ctx.tool(mutates=True)
+    async def write_tool():
+        return "ok"
+
+    result = await write_tool()
+    assert "disabled" in result
+
+
+async def test_no_claim_config_no_guard_overhead(mcp):
+    ctx = PluginContext(mcp, disable_mutating_tools=False, mutation_required_claim=None)
+    set_mutation_allowed(False)  # contextvar is False but claim check is not configured
+
+    @ctx.tool(mutates=True)
+    async def write_tool():
+        return "ok"
+
+    result = await write_tool()
+    assert result == "ok"
+
+
+def test_allowlist_skipped_plugin_logs_warning(ctx, caplog):
+    """A discovered plugin not in the allowlist is logged at WARNING."""
+    import logging
+
+    eps = _make_eps("blocked-plugin")
+    with patch("deriva_mcp_core.plugin.loader.entry_points", return_value=eps):
+        with caplog.at_level(logging.WARNING, logger="deriva_mcp_core.plugin.loader"):
+            load_plugins(ctx, allowlist=["other-plugin"])
+    assert any("blocked-plugin" in r.message for r in caplog.records)

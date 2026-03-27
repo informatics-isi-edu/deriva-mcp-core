@@ -32,6 +32,13 @@ _current_user_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "current_user_id", default=None
 )
 
+# Per-request mutation permission. Set by the auth verifier in HTTP mode based on
+# the mutation_required_claim config. Defaults to True so that stdio mode (where
+# verify_token is never called) implicitly permits mutations for the local user.
+_mutation_allowed: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "mutation_allowed", default=True
+)
+
 
 def set_current_credential(credential: dict) -> None:
     """Set the credential for the current request context.
@@ -49,6 +56,25 @@ def set_current_user_id(user_id: str) -> None:
     Not intended for use in tool or resource handlers.
     """
     _current_user_id.set(user_id)
+
+
+def set_mutation_allowed(allowed: bool) -> None:
+    """Set whether the current request principal is permitted to execute mutating tools.
+
+    Called by the auth verifier (HTTP) after evaluating the mutation_required_claim
+    config against the token introspection payload. Not intended for use in tool handlers.
+    """
+    _mutation_allowed.set(allowed)
+
+
+def is_mutation_allowed() -> bool:
+    """Return whether the current request principal may execute mutating tools.
+
+    Returns True in stdio mode (default) and in HTTP mode when no claim check is
+    configured or the required claim is present. Returns False in HTTP mode when a
+    mutation_required_claim is configured but the principal's token does not satisfy it.
+    """
+    return _mutation_allowed.get()
 
 
 # Module-level reference to the DerivedTokenCache singleton. Set by

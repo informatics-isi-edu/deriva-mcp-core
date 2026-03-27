@@ -49,6 +49,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ..context import is_mutation_allowed
+from ..telemetry import audit_event
+
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
 
@@ -78,14 +81,23 @@ _UNSET = object()
 _MUTATIONS_DISABLED_RESPONSE = json.dumps(
     {"error": "catalog mutations are disabled by server configuration"}
 )
+_MUTATIONS_NOT_PERMITTED_RESPONSE = json.dumps(
+    {"error": "catalog mutations are not permitted for your account"}
+)
 
 
 class PluginContext:
     """Wraps a FastMCP instance and exposes the full plugin registration API."""
 
-    def __init__(self, mcp: FastMCP, disable_mutating_tools: bool = False) -> None:
+    def __init__(
+        self,
+        mcp: FastMCP,
+        disable_mutating_tools: bool = False,
+        mutation_required_claim: dict[str, Any] | None = None,
+    ) -> None:
         self._mcp = mcp
         self._disable_mutating_tools = disable_mutating_tools
+        self._mutation_required_claim = mutation_required_claim
         self._catalog_connect_hooks: list[Callable[..., Any]] = []
         self._schema_change_hooks: list[Callable[..., Any]] = []
         self._rag_sources: list[RagSourceDeclaration] = []
@@ -118,14 +130,25 @@ class PluginContext:
 
         mcp_decorator = self._mcp.tool(*args, **kwargs)
 
-        if not (mutates and self._disable_mutating_tools):
+        needs_guard = mutates and (
+            self._disable_mutating_tools or self._mutation_required_claim is not None
+        )
+        if not needs_guard:
             return mcp_decorator
 
-        # mutates=True and kill switch enabled -- wrap with guard
+        # mutates=True and at least one guard is active -- wrap with per-call check
+        disable = self._disable_mutating_tools
+        claim_spec = self._mutation_required_claim
+
         def decorator(fn: Callable) -> Callable:
             @functools.wraps(fn)
             async def guarded(*a: Any, **kw: Any) -> Any:
-                return _MUTATIONS_DISABLED_RESPONSE
+                if disable:
+                    return _MUTATIONS_DISABLED_RESPONSE
+                if claim_spec is not None and not is_mutation_allowed():
+                    audit_event("mutation_claim_denied")
+                    return _MUTATIONS_NOT_PERMITTED_RESPONSE
+                return await fn(*a, **kw)
 
             return mcp_decorator(guarded)
 

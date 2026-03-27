@@ -33,6 +33,7 @@ All other variables have sane defaults and are optional.
 """
 
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse, urlunparse
 
 from pydantic import field_validator
@@ -115,6 +116,23 @@ class Settings(BaseSettings):
 
     # Safety
     disable_mutating_tools: bool = True
+
+    # Plugin allowlist. If None (unset), all discovered plugins are loaded.
+    # If set (including empty list), only plugins whose entry point name appears
+    # in the list are loaded. An empty list disables all external plugins.
+    # Set as a comma-separated string: DERIVA_MCP_PLUGIN_ALLOWLIST=deriva-ml,my-plugin
+    plugin_allowlist: list[str] | None = None
+
+    # Mutation claim requirement. If set, authenticated users must have a matching
+    # claim in their token introspection payload to execute mutating tools (when
+    # the killswitch is off). Specified as a JSON object where the key is the
+    # claim name and the value is the required scalar or list of accepted values.
+    # List values use OR semantics (any one match is sufficient).
+    # Multiple keys use AND semantics (all must match).
+    # Example: DERIVA_MCP_MUTATION_REQUIRED_CLAIM={"groups": ["deriva-mcp-mutator"]}
+    # Example: DERIVA_MCP_MUTATION_REQUIRED_CLAIM={"mcp_can_mutate": true}
+    # If unset, all authenticated users may mutate when the killswitch is off.
+    mutation_required_claim: dict[str, Any] | None = None
 
     # Logging
     debug: bool = False

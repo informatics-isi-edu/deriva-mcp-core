@@ -16,14 +16,25 @@ from .api import PluginContext
 logger = logging.getLogger(__name__)
 
 
-def load_plugins(ctx: PluginContext) -> None:
-    """Discover and register all installed deriva_mcp.plugins entry points.
+def load_plugins(ctx: PluginContext, allowlist: list[str] | None = None) -> None:
+    """Discover and register installed deriva_mcp.plugins entry points.
+
+    If allowlist is None, all discovered plugins are loaded (open discovery).
+    If allowlist is an empty list, no plugins are loaded.
+    If allowlist is a non-empty list, only plugins whose entry point name
+    appears in the list are loaded; others are logged at WARNING and skipped.
 
     Args:
         ctx: The shared PluginContext wrapping the FastMCP instance.
+        allowlist: Optional list of permitted entry point names.
     """
     eps = entry_points(group="deriva_mcp.plugins")
     for ep in eps:
+        if allowlist is not None and ep.name not in allowlist:
+            logger.warning(
+                "Plugin %r not in DERIVA_MCP_PLUGIN_ALLOWLIST, skipping", ep.name
+            )
+            continue
         try:
             register_fn = ep.load()
             register_fn(ctx)
