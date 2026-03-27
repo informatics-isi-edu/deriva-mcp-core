@@ -42,6 +42,22 @@ async def test_submit_returns_task_id():
     assert isinstance(task_id, str) and len(task_id) == 36  # UUID4
 
 
+async def test_submit_rejects_non_coroutine():
+    mgr = _make_manager()
+    with pytest.raises(TypeError, match="asyncio.to_thread"):
+        mgr.submit(lambda: None, name="bad", principal="u1", bearer_token=None)
+
+
+async def test_submit_rejects_sync_return_value():
+    mgr = _make_manager()
+
+    def _sync_fn() -> dict:
+        return {"done": True}
+
+    with pytest.raises(TypeError, match="asyncio.to_thread"):
+        mgr.submit(_sync_fn(), name="bad", principal="u1", bearer_token=None)
+
+
 async def test_get_returns_record_for_owner():
     mgr = _make_manager()
     task_id = mgr.submit(_noop(), name="test", principal="u1", bearer_token=None)

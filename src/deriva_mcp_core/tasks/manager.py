@@ -20,6 +20,7 @@ can run to completion without user interaction.
 """
 
 import asyncio
+import inspect
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -97,6 +98,19 @@ class TaskManager:
         Returns:
             task_id (UUID4 string). Pass this to get/list/cancel.
         """
+        if not inspect.iscoroutine(coroutine):
+            # Close any generator-like object to avoid ResourceWarning, then
+            # give an actionable message. Common mistakes:
+            #   submit(sync_fn(), ...)         -- sync_fn() returns non-coroutine
+            #   submit(sync_fn, ...)           -- forgot to call / wrap in to_thread
+            # Correct: submit(asyncio.to_thread(sync_fn, arg), ...)
+            kind = type(coroutine).__name__
+            raise TypeError(
+                f"submit() requires a coroutine, got {kind!r}. "
+                f"Wrap synchronous callables with asyncio.to_thread(): "
+                f"submit(asyncio.to_thread(fn, *args), name=...)"
+            )
+
         task_id = str(uuid4())
         record = TaskRecord(
             task_id=task_id,
