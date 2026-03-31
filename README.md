@@ -445,3 +445,14 @@ with no authentication required. Suitable for Docker health probes and load bala
 curl http://localhost:8000/health
 # {"status":"ok"}
 ```
+
+---
+
+## Development Status
+
+`deriva-mcp-core` is alpha-quality software. The API and configuration surface are
+still evolving and breaking changes may occur between releases without advance notice.
+It has been validated end-to-end against live DERIVA deployments, but has not yet seen
+broad production use. Use in production environments is at your own risk. Bug reports
+and contributions are welcome via the
+[issue tracker](https://github.com/informatics-isi-edu/deriva-mcp-core/issues).
