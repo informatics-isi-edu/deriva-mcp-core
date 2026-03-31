@@ -64,6 +64,11 @@ def register(ctx: PluginContext) -> None:
                 never a plain date. Call resolve_snaptime first to convert a date.
             schema: Schema name containing the vocabulary table.
             table: Vocabulary table name (e.g., "Dataset_Type", "Tissue").
+
+        Display rules: always show RID. Omit ERMrest system columns RCT, RMT,
+        RCB, RMB unless the user explicitly asks for them. Show ALL remaining
+        columns in results, including those whose values are entirely null --
+        never hide a column because its values are null.
         """
         try:
             with deriva_call():

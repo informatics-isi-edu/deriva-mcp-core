@@ -81,6 +81,11 @@ def register(ctx: PluginContext) -> None:
             after_rid: When set, adds @sort(RID)@after(after_rid) after the column
                 projection to advance the cursor to the next page. Set this to the
                 RID of the last row from the previous page.
+
+        Display rules: always show RID. Omit ERMrest system columns RCT, RMT,
+        RCB, RMB unless the user explicitly asks for them. Show ALL remaining
+        columns in results, including those whose values are entirely null --
+        never hide a column because its values are null.
         """
         try:
             with deriva_call():
