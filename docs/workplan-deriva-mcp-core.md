@@ -1638,18 +1638,21 @@ tokens must not be written to disk.
 
 ---
 
-### Phase 6 -- Documentation and Handoff [TODO]
+### Phase 6 -- Documentation and Handoff [DONE -- 2026-03-30]
 
-- README: installation, transport modes, configuration reference, plugin authoring guide
-- Plugin authoring guide:
+- README: installation, transport modes, configuration reference, plugin authoring guide **[DONE]**
+- Plugin authoring guide (`docs/plugin-authoring-guide.md`): **[DONE]**
     - How to write a `register(ctx)` function and package entry points
     - When to use `get_catalog()` / `get_hatrac_store()` vs `get_request_credential()`
     - How to register and use lifecycle hooks (`on_catalog_connect`, `on_schema_change`)
-    - How to extend the RAG subsystem: implementing the `VectorStore` protocol, adding
-      custom documentation sources, building a data indexing layer (deriva-ml pattern)
-    - Testing patterns for plugins (using `conftest.py` fixtures from core test suite)
-- Deployment guide: VM, Docker Compose, Kubernetes patterns; ChromaDB vs pgvector
-  backend selection guidance
+    - How to extend the RAG subsystem: custom documentation sources, `index_table_data()`,
+      `RowSerializer` protocol (deriva-ml pattern)
+    - Background task submission and credential re-exchange
+    - Testing patterns for plugins (`_CapturingMCP`, `PluginContext`, import patterns)
+- Deployment guide (`docs/deployment-guide.md`): Docker Compose (deriva-docker),
+  standalone Docker, VM/bare metal (systemd + reverse proxy configs for Traefik/Apache/nginx),
+  ChromaDB vs pgvector selection, logging/audit, TLS, MCP client config **[DONE]**
+- Usage guide (`docs/usage-guide.md`): natural language prompt examples for all tool categories **[DONE]**
 - Note: deriva-ml tool port is out of scope; the plugin framework and lifecycle hooks
   are the handoff artifacts for that work
 
