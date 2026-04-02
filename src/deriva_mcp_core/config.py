@@ -117,6 +117,16 @@ class Settings(BaseSettings):
     # Safety
     disable_mutating_tools: bool = True
 
+    # Anonymous access. When True, unauthenticated requests are allowed alongside
+    # authenticated ones (token is optional rather than required).
+    # Anonymous requests receive empty DERIVA credentials (public/anonymous catalog
+    # access) and read-only mutation permission (mutation_allowed=False).
+    # When credenza_url is also set, provided tokens are still validated normally --
+    # a bad token is rejected with 401 rather than silently downgraded to anonymous.
+    # When credenza_url is NOT set (anonymous-only mode), any provided bearer token
+    # is rejected with 401 and all traffic is anonymous.
+    allow_anonymous: bool = False
+
     # Plugin allowlist. If None (unset), all discovered plugins are loaded.
     # If set (including empty list), only plugins whose entry point name appears
     # in the list are loaded. An empty list disables all external plugins.
@@ -183,9 +193,18 @@ class Settings(BaseSettings):
     def validate_for_http(self) -> None:
         """Raise ValueError if any field required for HTTP transport is empty.
 
-        Call this during server startup when --transport streamable-http is selected.
+        Call this during server startup when --transport http is selected.
         Not required for stdio transport (no Credenza interaction).
+
+        When allow_anonymous=True and credenza_url is not set, no Credenza fields
+        are required -- the server operates in anonymous-only mode where all
+        traffic is treated as unauthenticated.  When credenza_url IS set (mixed
+        mode: anonymous + authenticated), all Credenza fields are still validated
+        so the authenticated path works correctly.
         """
+        if self.allow_anonymous and not self.credenza_url:
+            # Anonymous-only mode: no Credenza interaction needed.
+            return
         required = {
             "DERIVA_MCP_CREDENZA_URL": self.credenza_url,
             "DERIVA_MCP_SERVER_URL": self.server_url,

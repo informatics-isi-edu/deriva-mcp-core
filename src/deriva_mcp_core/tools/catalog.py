@@ -53,6 +53,7 @@ from ..context import (
     get_catalog,
     get_request_credential,
     get_request_user_id,
+    resolve_user_identity,
 )
 from ..plugin.api import fire_catalog_connect
 from ..tasks.manager import get_task_manager
@@ -111,11 +112,17 @@ def _fk_summary(fk: dict) -> dict[str, Any]:
     }
 
 
-def _fetch_schema(hostname: str, catalog_id: str) -> dict:
-    """Fetch full schema JSON, compute hash, and fire on_catalog_connect hooks."""
+def _fetch_schema(hostname: str, catalog_id: str, user_id: str) -> dict:
+    """Fetch full schema JSON using the current credential, compute hash, fire hooks.
+
+    The schema is fetched with the requesting user's derived token so the
+    response reflects their actual ACL view -- tables and columns they cannot
+    see are absent from the response. The hash of that response is the
+    visibility-class key used by the RAG index.
+    """
     # Pre-claim the slot so _on_catalog_access (triggered by get_catalog below)
-    # does not schedule a redundant background _fetch_schema for the same catalog.
-    _connected_catalogs.add((_remap(hostname), catalog_id))
+    # does not schedule a redundant background _fetch_schema for the same key.
+    _connected_user_catalogs.add((_remap(hostname), catalog_id, user_id))
     with deriva_call():
         catalog = get_catalog(hostname, catalog_id)
         # Note: deriva-py catalog.get() is a synchronous requests call.
@@ -125,33 +132,38 @@ def _fetch_schema(hostname: str, catalog_id: str) -> dict:
     return schema_json
 
 
-# Per-server-lifetime set of (internal_hostname, catalog_id) pairs whose
-# on_catalog_connect hooks have already been fired. After first access this is
-# just a set lookup -- effectively a noop.
-_connected_catalogs: set[tuple[str, str]] = set()
+# Per-server-lifetime set of (internal_hostname, catalog_id, user_id) triples
+# whose on_catalog_connect hooks have already been fired for that user's
+# ACL view. Keying by user_id ensures each distinct identity fetches its own
+# /schema so the visibility-class hash accurately reflects what that user can
+# see. Two users with identical effective ACLs will produce the same hash and
+# share one vector-store entry; a restricted user gets a separate entry.
+_connected_user_catalogs: set[tuple[str, str, str]] = set()
 _connect_tasks: set[asyncio.Task] = set()
 
 
 def _on_catalog_access(hostname: str, catalog_id: str) -> None:
     """Callback registered with context.py; fired by get_catalog() on every call.
 
-    Schedules a background schema fetch + on_catalog_connect hook dispatch the
-    first time a given catalog is accessed. Subsequent calls are a set lookup.
+    Resolves the current user identity (contextvar in HTTP mode; GET /authn/session
+    in stdio mode) and schedules a per-user background schema fetch the first time
+    a given (catalog, user) pair is seen. Subsequent calls are a set lookup.
     """
-    key = (hostname, catalog_id)
-    if key in _connected_catalogs:
+    user_id = resolve_user_identity(hostname)
+    key = (hostname, catalog_id, user_id)
+    if key in _connected_user_catalogs:
         return
-    _connected_catalogs.add(key)
+    _connected_user_catalogs.add(key)
 
     async def _do() -> None:
         try:
-            _fetch_schema(hostname, catalog_id)
+            _fetch_schema(hostname, catalog_id, user_id)
         except Exception:
             logger.debug(
-                "Background on_catalog_connect failed for %s/%s",
-                hostname, catalog_id, exc_info=True,
+                "Background on_catalog_connect failed for %s/%s (user %s)",
+                hostname, catalog_id, user_id, exc_info=True,
             )
-            _connected_catalogs.discard(key)
+            _connected_user_catalogs.discard(key)
 
     try:
         task = asyncio.get_running_loop().create_task(_do())
@@ -215,7 +227,7 @@ def register(ctx: PluginContext) -> None:
                 a plain date. Call resolve_snaptime first to convert a date.
         """
         try:
-            schema_json = _fetch_schema(hostname, catalog_id)
+            schema_json = _fetch_schema(hostname, catalog_id, resolve_user_identity(hostname))
             schemas = [
                 {
                     "schema": name,
@@ -247,7 +259,7 @@ def register(ctx: PluginContext) -> None:
                 a plain date. Call resolve_snaptime first to convert a date.
         """
         try:
-            schema_json = _fetch_schema(hostname, catalog_id)
+            schema_json = _fetch_schema(hostname, catalog_id, resolve_user_identity(hostname))
             names = [n for n in schema_json.get("schemas", {}) if n not in _SYSTEM_SCHEMAS]
             return json.dumps({"schemas": names})
         except Exception as exc:
@@ -269,7 +281,7 @@ def register(ctx: PluginContext) -> None:
             schema: Schema name (e.g. "public" or "isa").
         """
         try:
-            schema_json = _fetch_schema(hostname, catalog_id)
+            schema_json = _fetch_schema(hostname, catalog_id, resolve_user_identity(hostname))
             schema_doc = schema_json.get("schemas", {}).get(schema)
             if schema_doc is None:
                 return json.dumps({"error": f"Schema not found: {schema!r}"})
@@ -311,7 +323,7 @@ def register(ctx: PluginContext) -> None:
             table: Table name.
         """
         try:
-            schema_json = _fetch_schema(hostname, catalog_id)
+            schema_json = _fetch_schema(hostname, catalog_id, resolve_user_identity(hostname))
             schema_doc = schema_json.get("schemas", {}).get(schema)
             if schema_doc is None:
                 return json.dumps({"error": f"Schema not found: {schema!r}"})

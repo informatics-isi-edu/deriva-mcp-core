@@ -18,6 +18,7 @@ with per-request OAuth authentication via [Credenza](https://github.com/informat
 - [Built-in Tools](#built-in-tools)
 - [RAG Subsystem](#rag-subsystem)
 - [Safety Controls](#safety-controls)
+    - [Anonymous Access](#anonymous-access)
 - [Plugin Framework](#plugin-framework)
 - [Health Endpoint](#health-endpoint)
 
@@ -135,6 +136,7 @@ and the [Deployment Guide](docs/deployment-guide.md).
 | `DERIVA_MCP_CLIENT_SECRET`                | *(required for HTTP)*         | Client secret for Credenza token exchange                                                                                                  |
 | `DERIVA_MCP_CLIENT_ID`                    | `deriva-mcp`                  | Client ID registered with Credenza                                                                                                         |
 | `DERIVA_MCP_DERIVA_RESOURCE`              | `urn:deriva:rest:service:all` | Resource identifier to request in token exchange                                                                                           |
+| `DERIVA_MCP_ALLOW_ANONYMOUS`              | `false`                       | Allow unauthenticated requests (see [Anonymous Access](#anonymous-access))                                                                 |
 | `DERIVA_MCP_DISABLE_MUTATING_TOOLS`       | `true`                        | When `true`, all tools registered as mutating return an error without executing                                                            |
 | `DERIVA_MCP_PLUGIN_ALLOWLIST`             | *(unset -- allow all)*        | Comma-separated list of plugin entry point names to load; empty string disables all external plugins                                       |
 | `DERIVA_MCP_MUTATION_REQUIRED_CLAIM`      | *(unset)*                     | JSON claim spec that must match the token introspection payload before mutations are permitted (e.g. `{"groups": ["deriva-mcp-mutator"]}`) |
@@ -359,6 +361,47 @@ DERIVA_MCP_PLUGIN_ALLOWLIST =
 ```
 
 Blocked plugins are logged at WARNING level so operators can audit what was skipped.
+
+### Anonymous access
+
+Set `DERIVA_MCP_ALLOW_ANONYMOUS=true` to allow requests without an `Authorization`
+header. This is useful for deployments serving publicly readable catalogs where
+requiring users to authenticate would be unnecessary friction.
+
+**Behavior:**
+
+- **No token provided:** the request proceeds with empty DERIVA credentials, equivalent
+  to what an unauthenticated browser request would receive. Mutations are blocked
+  regardless of the kill-switch setting -- anonymous access is always read-only.
+- **Valid token provided:** normal Credenza validation and token exchange; the request
+  runs as that authenticated user with their normal permissions.
+- **Invalid/expired token provided:** 401 response. A client that sends a token must
+  send a valid one -- bad tokens are never silently downgraded to anonymous.
+
+**Sub-modes:**
+
+| `DERIVA_MCP_CREDENZA_URL` set? | Mode           | Effect                                                                      |
+|--------------------------------|----------------|-----------------------------------------------------------------------------|
+| Yes                            | Mixed          | Both authenticated and anonymous requests work                              |
+| No                             | Anonymous-only | Credenza fields are not required at startup; any provided token is rejected |
+
+Example (anonymous-only, public read-only catalog):
+
+```ini
+DERIVA_MCP_ALLOW_ANONYMOUS = true
+# No DERIVA_MCP_CREDENZA_URL, SERVER_URL, CLIENT_SECRET etc. needed
+```
+
+Example (mixed mode -- auth optional):
+
+```ini
+DERIVA_MCP_ALLOW_ANONYMOUS = true
+DERIVA_MCP_CREDENZA_URL = https://your-host/authn
+DERIVA_MCP_SERVER_URL = https://your-host/mcp
+DERIVA_MCP_SERVER_RESOURCE = https://your-host/mcp
+DERIVA_MCP_CLIENT_ID = deriva-mcp
+DERIVA_MCP_CLIENT_SECRET = your-client-secret
+```
 
 ### Per-user mutation claim gating
 

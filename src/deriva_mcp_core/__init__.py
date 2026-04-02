@@ -46,6 +46,7 @@ from .context import (
     get_hatrac_store,
     get_request_credential,
     get_request_user_id,
+    resolve_user_identity,
 )
 
 __all__ = [
@@ -54,4 +55,5 @@ __all__ = [
     "get_hatrac_store",
     "get_request_credential",
     "get_request_user_id",
+    "resolve_user_identity",
 ]

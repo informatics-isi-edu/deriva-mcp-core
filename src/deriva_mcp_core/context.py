@@ -15,9 +15,12 @@ Public API:
 
 import contextlib
 import contextvars
+import logging
 from collections.abc import Callable
 
 from deriva.core import DerivaServer, HatracStore
+
+logger = logging.getLogger(__name__)
 
 # Per-request credential dict. Format matches what DerivaBinding accepts:
 #   {"bearer-token": "<token>"}        -- HTTP mode (derived Credenza token)
@@ -198,6 +201,71 @@ def get_request_user_id() -> str:
     """
     uid = _current_user_id.get()
     return uid if uid is not None else "stdio"
+
+
+# Cache for stdio-mode identity resolution. Keyed by internal hostname.
+# Identity does not change with credential rotation (the token changes, the
+# person does not), so caching by hostname is correct.
+_stdio_identity_cache: dict[str, str] = {}
+
+
+def resolve_user_identity(hostname: str) -> str:
+    """Return the user identity for the current request context.
+
+    In HTTP mode, returns the identity already set by the auth middleware (from
+    Credenza token introspection) -- no I/O involved.
+
+    In stdio mode, calls GET /authn/session on the DERIVA host using the
+    current credential to resolve the iss/sub composite identity. The result
+    is cached per (internal) hostname so the call is made at most once per
+    server lifetime per host.
+
+    Falls back to "anonymous" if resolution fails or no credential is present.
+
+    Args:
+        hostname: DERIVA server hostname. Remapping is applied internally.
+    """
+    uid = _current_user_id.get()
+    if uid is not None:
+        return uid
+
+    internal = _remap(hostname)
+    cached = _stdio_identity_cache.get(internal)
+    if cached is not None:
+        return cached
+
+    try:
+        import requests  # lazy: requests is a transitive dep via deriva-py
+
+        credential = _get_credential_fn(internal)
+        headers: dict[str, str] = {}
+        if "bearer-token" in credential:
+            headers["Authorization"] = f"Bearer {credential['bearer-token']}"
+        elif "cookie" in credential:
+            headers["Cookie"] = credential["cookie"]
+
+        resp = requests.get(
+            f"https://{internal}/authn/session",
+            headers=headers,
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            # Non-legacy: top-level "id"; legacy: client.id
+            user_id = data.get("id") or (data.get("client") or {}).get("id")
+            if user_id:
+                _stdio_identity_cache[internal] = user_id
+                return user_id
+        else:
+            logger.debug(
+                "resolve_user_identity: /authn/session returned %d for %s",
+                resp.status_code,
+                internal,
+            )
+    except Exception as exc:
+        logger.debug("resolve_user_identity failed for %s: %s", hostname, exc)
+
+    return "anonymous"
 
 
 def get_request_credential() -> dict:

@@ -216,9 +216,13 @@ class TestRagSearch:
     ):
         # Schema chunks from a different catalog should be excluded; doc chunks
         # and same-catalog schema chunks should be kept.
+        # The user's visibility-class hash must be registered in _user_schema_hashes
+        # before rag_search will include schema results (correct ACL isolation behaviour).
+        from deriva_mcp_core.rag import tools as rag_tools
         from deriva_mcp_core.rag.schema import schema_source_name
 
-        my_source = schema_source_name("localhost", "1", "aabbccdd1122")
+        my_hash = "aabbccdd1122"
+        my_source = schema_source_name("localhost", "1", my_hash)
         other_source = schema_source_name("otherhost", "2", "deadbeef9999")
         mock_store.set_search_results(
             [
@@ -228,9 +232,39 @@ class TestRagSearch:
             ]
         )
         tools, _ = _register_rag(ctx, mock_store)
+        # Register the caller's visibility class (resolve_user_identity returns "anonymous"
+        # in tests since no contextvar is set).
+        rag_tools._user_schema_hashes[("anonymous", "localhost", "1")] = my_hash[:16]
+        try:
+            result = json.loads(await tools["rag_search"]("q", hostname="localhost", catalog_id="1"))
+            sources = [r["source"] for r in result]
+            assert my_source in sources
+            assert other_source not in sources
+            assert "deriva-py-docs:guide.md" in sources
+        finally:
+            rag_tools._user_schema_hashes.pop(("anonymous", "localhost", "1"), None)
+
+    async def test_schema_results_excluded_when_hash_not_registered(
+        self, ctx, mock_store
+    ):
+        # When the caller's schema hash is not in _user_schema_hashes (schema not
+        # yet indexed for this user), all schema results must be excluded to prevent
+        # serving a different user's visibility class.
+        from deriva_mcp_core.rag import tools as rag_tools
+        from deriva_mcp_core.rag.schema import schema_source_name
+
+        other_source = schema_source_name("localhost", "1", "aabbccdd1122")
+        mock_store.set_search_results(
+            [
+                SearchResult(text="s", source=other_source, doc_type="schema", score=0.9, metadata={}),
+                SearchResult(text="d", source="deriva-py-docs:guide.md", doc_type="user-guide", score=0.8, metadata={}),
+            ]
+        )
+        tools, _ = _register_rag(ctx, mock_store)
+        # Ensure no hash is registered for this user/catalog
+        rag_tools._user_schema_hashes.pop(("anonymous", "localhost", "1"), None)
         result = json.loads(await tools["rag_search"]("q", hostname="localhost", catalog_id="1"))
         sources = [r["source"] for r in result]
-        assert my_source in sources
         assert other_source not in sources
         assert "deriva-py-docs:guide.md" in sources
 

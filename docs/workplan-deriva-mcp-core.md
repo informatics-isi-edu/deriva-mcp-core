@@ -56,6 +56,32 @@ Bearer token in request
             -> returns credential dict for passing to DerivaML(...) or similar
 ```
 
+### Request Auth Flow (HTTP, allow-anonymous mode)
+
+When `DERIVA_MCP_ALLOW_ANONYMOUS=true` the FastMCP `token_verifier`/`auth` parameters
+are not set. Instead, `AnonymousPermitMiddleware` (added by `build_http_app()`) handles
+all auth decisions:
+
+```
+Request with Authorization: Bearer <token>
+  -> AnonymousPermitMiddleware: token present
+       -> verifier set: CredenzaTokenVerifier.verify_token() (same flow as above)
+            -> invalid: 401
+            -> valid: contextvars set; tool executes with derived credential
+       -> verifier not set (anonymous-only mode, no credenza_url): 401
+
+Request with no Authorization header
+  -> AnonymousPermitMiddleware: no token
+       -> set _current_credential = {}  (anonymous DERIVA access)
+       -> set _current_user_id = "anonymous"
+       -> set _mutation_allowed = False  (anonymous is always read-only)
+       -> tool executes; get_catalog() uses empty credential dict
+```
+
+`build_http_app(mcp)` must be used instead of `mcp.streamable_http_app()` to ensure
+the middleware is active. Normal (non-anonymous) mode: `build_http_app()` delegates
+to `mcp.streamable_http_app()` unchanged.
+
 ### Request Auth Flow (stdio)
 
 ```
@@ -319,13 +345,14 @@ take precedence over the env file.
 |--------------------|----------|---------|---------------------------------------------|
 | `DERIVA_MCP_DEBUG` | No       | `false` | Set to `true` to enable DEBUG-level logging |
 
-**Safety:**
+**Safety and access control:**
 
-| Variable                             | Required | Default | Description                                                                                                                                                                                                                                                                 |
-|--------------------------------------|----------|---------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `DERIVA_MCP_DISABLE_MUTATING_TOOLS`  | No       | `true`  | Kill switch for all tools registered with `mutates=True`. Defaults to enabled -- operators must explicitly set `false` to allow catalog writes.                                                                                                                             |
-| `DERIVA_MCP_PLUGIN_ALLOWLIST`        | No       | --      | Comma-separated list of permitted plugin entry point names. If unset, all discovered plugins load. If set (including empty), only named plugins load; others are logged at WARNING and skipped. Example: `deriva-ml,my-org-plugin`                                          |
-| `DERIVA_MCP_MUTATION_REQUIRED_CLAIM` | No       | --      | JSON object specifying a token claim that must be satisfied for a principal to execute mutating tools (when kill switch is off). Keys are claim names; values are required scalars or lists (list = OR, multiple keys = AND). Example: `{"groups": ["deriva-mcp-mutator"]}` |
+| Variable                             | Required | Default | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+|--------------------------------------|----------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `DERIVA_MCP_DISABLE_MUTATING_TOOLS`  | No       | `true`  | Kill switch for all tools registered with `mutates=True`. Defaults to enabled -- operators must explicitly set `false` to allow catalog writes.                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `DERIVA_MCP_ALLOW_ANONYMOUS`         | No       | `false` | Allow unauthenticated requests. When `true`, a missing `Authorization` header is treated as anonymous access: DERIVA calls use empty credentials (public/anonymous catalog access) and mutations are blocked regardless of the kill-switch setting. A present but invalid token is still rejected with 401. When `DERIVA_MCP_CREDENZA_URL` is also set, valid tokens are still fully authenticated (mixed mode). When `DERIVA_MCP_CREDENZA_URL` is not set (anonymous-only mode), no Credenza fields are required and any provided token is rejected. |
+| `DERIVA_MCP_PLUGIN_ALLOWLIST`        | No       | --      | Comma-separated list of permitted plugin entry point names. If unset, all discovered plugins load. If set (including empty), only named plugins load; others are logged at WARNING and skipped. Example: `deriva-ml,my-org-plugin`                                                                                                                                                                                                                                                                                                                    |
+| `DERIVA_MCP_MUTATION_REQUIRED_CLAIM` | No       | --      | JSON object specifying a token claim that must be satisfied for a principal to execute mutating tools (when kill switch is off). Keys are claim names; values are required scalars or lists (list = OR, multiple keys = AND). Example: `{"groups": ["deriva-mcp-mutator"]}`                                                                                                                                                                                                                                                                           |
 
 **Audit logging:**
 
@@ -364,6 +391,7 @@ deriva-mcp-core/
         ├── context.py           # Per-request contextvar (_current_credential)
         ├── auth/
         │   ├── __init__.py
+        │   ├── anonymous.py     # AnonymousPermitMiddleware (DERIVA_MCP_ALLOW_ANONYMOUS mode)
         │   ├── introspect.py    # Credenza POST /introspect client
         │   ├── exchange.py      # Credenza POST /token token_exchange client
         │   ├── token_cache.py   # Smart derived token cache
@@ -1655,6 +1683,103 @@ tokens must not be written to disk.
 - Usage guide (`docs/usage-guide.md`): natural language prompt examples for all tool categories **[DONE]**
 - Note: deriva-ml tool port is out of scope; the plugin framework and lifecycle hooks
   are the handoff artifacts for that work
+
+---
+
+### Post-Phase-6 Hardening
+
+**Anonymous / zero-auth mode [DONE -- 2026-04-01]**
+
+Added `DERIVA_MCP_ALLOW_ANONYMOUS=true` to support deployments where authentication
+is optional or unavailable:
+
+- `AnonymousPermitMiddleware` (`auth/anonymous.py`): ASGI middleware that handles
+  all auth decisions when anonymous mode is active. Token present -> validates via
+  Credenza as normal; token absent -> sets empty credential and `mutation_allowed=False`;
+  invalid token -> 401 (never silently downgraded to anonymous).
+- `build_http_app(mcp)` (`server.py`): utility that wraps `mcp.streamable_http_app()`
+  with the anonymous middleware when needed. Used by `main()` and tests.
+- Two sub-modes controlled by whether `DERIVA_MCP_CREDENZA_URL` is set:
+    - Mixed mode (credenza_url set): authenticated and anonymous requests both supported.
+    - Anonymous-only mode (no credenza_url): Credenza fields not required at startup;
+      any provided bearer token is rejected with 401.
+- Anonymous background tasks inherit empty credentials via contextvar propagation;
+  `TaskManager` requires no changes.
+- 18 new tests in `tests/test_anonymous.py`; full suite: 439 tests, 88% coverage.
+
+**RAG ACL isolation and stdio identity [DONE -- 2026-04-02]**
+
+Fixed a security gap where schema indexing claimed per-ACL-view isolation but
+actually served all users the same schema index (the first accessor's view).
+Also resolved stdio-mode identity: `get_request_user_id_optional()` returns
+None in stdio mode, so schema fetches were silently keyed as anonymous,
+defeating per-user isolation.
+
+#### Problem
+
+`_connected_catalogs` was keyed by `(hostname, catalog_id)` -- one entry per
+catalog regardless of which user triggered the index. The first user to access
+a catalog owned the schema chunk for everyone. A restricted user could receive
+schema chunks from a privileged user's view of the same catalog.
+
+Note: ERMrest `/schema` itself is NOT ACL-filtered -- it returns full structural
+schema to all authenticated users. The isolation concern is for environments
+where schema visibility should still differ per user (e.g., future ACL-filtered
+endpoints, or where schema visibility is used as a proxy for catalog access
+gating).
+
+#### Fix: per-user schema indexing (`tools/catalog.py`)
+
+- `_connected_catalogs: set[tuple[str, str]]` replaced by
+  `_connected_user_catalogs: set[tuple[str, str, str]]` keyed by
+  `(hostname, catalog_id, user_id)`.
+- `_fetch_schema(hostname, catalog_id, user_id)` -- takes `user_id`, pre-claims
+  the triple before the async fetch to prevent concurrent duplicate indexing.
+- `_on_catalog_access`: resolves identity via `resolve_user_identity(hostname)`;
+  each user's first access to a catalog triggers their own schema fetch.
+- All explicit `_fetch_schema` call sites updated to pass
+  `resolve_user_identity(hostname)` as `user_id`.
+
+#### Fix: `_user_schema_hashes` and `rag_search` filtering (`rag/tools.py`)
+
+- New module-level `_user_schema_hashes: dict[tuple[str, str, str], str]`
+  mapping `(user_id, hostname, catalog_id) -> hash[:16]`.
+- Populated in `_handle_catalog_connect` after successful schema indexing, and
+  in `rag_index_schema` after manual reindex.
+- `rag_search` with `hostname`+`catalog_id` now:
+    - Resolves caller's identity via `resolve_user_identity(hostname)`.
+    - Looks up `user_hash = _user_schema_hashes.get((user_id, hostname, catalog_id))`.
+    - If hash found: keeps only schema results whose `source` exactly equals
+      `schema_source_name(hostname, catalog_id, user_hash)`.
+    - If hash not found (schema not yet indexed for this user): all schema results
+      are excluded -- never serves another user's visibility class.
+    - Non-schema results (`doc_type != "schema"`) are unaffected.
+
+#### `resolve_user_identity(hostname)` (`context.py`)
+
+New synchronous public function exported from `deriva_mcp_core`:
+
+- HTTP mode: reads `_current_user_id` contextvar (set by auth middleware) --
+  no I/O.
+- stdio mode: calls `GET /authn/session` on the DERIVA host using the current
+  credential. Parses `id` (non-legacy) or `client.id` (legacy) from the
+  response. Result is cached per internal hostname for the server lifetime
+  (identity does not change with credential rotation). Uses `requests` (lazy
+  import; transitive dep via deriva-py). Falls back to `"anonymous"` on
+  failure or missing credential.
+- Deliberately synchronous -- it is a fundamental control-flow call in
+  stdio mode and the latency is acceptable.
+
+The function is also exported from `deriva_mcp_core.__init__` so plugins can
+use it without reaching into `context` directly.
+
+#### Tests
+
+- `test_hostname_catalog_filters_out_other_catalog_schema_results`: seeds
+  `rag_tools._user_schema_hashes[("anonymous", "localhost", "1")]` with cleanup.
+- New `test_schema_results_excluded_when_hash_not_registered`: verifies all
+  schema results are withheld when the caller's hash is not yet registered.
+- Full suite: 454 tests, 91% coverage.
 
 ---
 

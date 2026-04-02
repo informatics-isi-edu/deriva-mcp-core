@@ -11,7 +11,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from ..context import get_catalog, get_request_user_id
+from ..context import get_catalog, get_request_user_id, resolve_user_identity
 
 if TYPE_CHECKING:
     from ..plugin.api import PluginContext
@@ -21,6 +21,12 @@ logger = logging.getLogger(__name__)
 # Module-level reference to the active VectorStore. Set by register() when
 # DERIVA_MCP_RAG_ENABLED=true. None when RAG is disabled or not yet started.
 _rag_store: Any | None = None
+
+# Per-user schema visibility class index. Maps (user_id, hostname, catalog_id)
+# to the 16-character truncated schema hash stored in the vector store source name.
+# Populated by the on_catalog_connect hook and rag_index_schema.
+# Used by rag_search to restrict schema results to the caller's ACL view.
+_user_schema_hashes: dict[tuple[str, str, str], str] = {}
 
 
 def get_rag_store() -> Any | None:
@@ -128,6 +134,11 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
         try:
             if not await has_schema(store, hostname, catalog_id, schema_hash):
                 await index_schema(store, hostname, catalog_id, schema_json)
+            # Record this user's visibility class so rag_search can filter to it.
+            # resolve_user_identity uses the contextvar in HTTP mode (already set)
+            # and the cached /authn/session result in stdio mode.
+            user_id = resolve_user_identity(hostname)
+            _user_schema_hashes[(user_id, hostname, catalog_id)] = schema_hash[:16]
         except Exception:
             logger.warning(
                 "Schema auto-index failed for %s/%s", hostname, catalog_id, exc_info=True
@@ -166,13 +177,22 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
                 where["doc_type"] = doc_type
             results = await store.search(query, limit=limit, where=where if where else None)
             if hostname and catalog_id:
-                # Exclude schema chunks that belong to a different catalog.
-                # Non-schema sources (user-guide, data) are always included.
-                schema_prefix = schema_source_name(hostname, catalog_id, "")
-                results = [
-                    r for r in results
-                    if not r.source.startswith("schema:") or r.source.startswith(schema_prefix)
-                ]
+                # Restrict schema results to this caller's ACL visibility class.
+                # Two users whose /schema responses are identical share the same
+                # hash and therefore the same index entry. A restricted user gets
+                # a different hash and only sees their own entry. Non-schema
+                # sources (user-guide, data) are always included.
+                user_id = resolve_user_identity(hostname)
+                user_hash = _user_schema_hashes.get((user_id, hostname, catalog_id))
+                if user_hash:
+                    own_source = schema_source_name(hostname, catalog_id, user_hash)
+                    results = [
+                        r for r in results
+                        if not r.source.startswith("schema:") or r.source == own_source
+                    ]
+                else:
+                    # Schema not yet indexed for this user -- exclude schema results.
+                    results = [r for r in results if not r.source.startswith("schema:")]
             return json.dumps(
                 [
                     {
@@ -276,6 +296,8 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
             schema_json = catalog.get("/schema").json()
             schema_hash = compute_schema_hash(schema_json)
             await index_schema(store, hostname, catalog_id, schema_json)
+            user_id = resolve_user_identity(hostname)
+            _user_schema_hashes[(user_id, hostname, catalog_id)] = schema_hash[:16]
             return json.dumps(
                 {
                     "status": "indexed",

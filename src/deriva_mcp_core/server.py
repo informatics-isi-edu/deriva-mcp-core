@@ -130,23 +130,47 @@ def create_server(
 
     if transport == "http":
         cfg.validate_for_http()
-        token_cache = DerivedTokenCache(cfg)
-        _set_token_cache(token_cache)
-        introspect_cache = IntrospectionCache(cfg)
-        verifier = CredenzaTokenVerifier(cfg, token_cache, introspect_cache)
-        auth = AuthSettings(
-            issuer_url=cfg.credenza_url,
-            resource_server_url=cfg.server_url,
-        )
-        mcp = FastMCP(
-            "deriva-mcp-core",
-            token_verifier=verifier,
-            auth=auth,
-            host=host,
-            port=port,
-            streamable_http_path="/",
-            stateless_http=True,
-        )
+
+        # Build Credenza components only when a Credenza URL is configured.
+        # In anonymous-only mode (allow_anonymous=True, no credenza_url) these
+        # are omitted entirely -- no introspection or token exchange is needed.
+        token_cache = None
+        verifier = None
+        if cfg.credenza_url:
+            token_cache = DerivedTokenCache(cfg)
+            _set_token_cache(token_cache)
+            introspect_cache = IntrospectionCache(cfg)
+            verifier = CredenzaTokenVerifier(cfg, token_cache, introspect_cache)
+
+        if cfg.allow_anonymous:
+            # Anonymous mode: FastMCP has no built-in auth enforcement.
+            # AnonymousPermitMiddleware (added by build_http_app) handles
+            # token extraction, validation, and anonymous fallback.
+            mcp = FastMCP(
+                "deriva-mcp-core",
+                host=host,
+                port=port,
+                streamable_http_path="/",
+                stateless_http=True,
+            )
+            # Stash the verifier (may be None for anonymous-only mode) so
+            # build_http_app() can wire up AnonymousPermitMiddleware correctly.
+            mcp._allow_anonymous_verifier = verifier  # type: ignore[attr-defined]
+        else:
+            auth = AuthSettings(
+                issuer_url=cfg.credenza_url,
+                resource_server_url=cfg.server_url,
+            )
+            mcp = FastMCP(
+                "deriva-mcp-core",
+                token_verifier=verifier,
+                auth=auth,
+                host=host,
+                port=port,
+                streamable_http_path="/",
+                stateless_http=True,
+            )
+
         task_manager = TaskManager(token_cache=token_cache)
     else:
         # stdio: read per-hostname credentials from local disk at call time
@@ -179,6 +203,29 @@ def create_server(
     load_plugins(ctx, allowlist=cfg.plugin_allowlist)
 
     return mcp
+
+
+_MISSING = object()
+
+
+def build_http_app(mcp):
+    """Return the Starlette ASGI app for HTTP transport.
+
+    In normal auth-required mode this is equivalent to mcp.streamable_http_app().
+
+    In allow-anonymous mode (detected via the _allow_anonymous_verifier attribute
+    set by create_server()) this wraps the app with AnonymousPermitMiddleware so
+    that unauthenticated requests receive empty DERIVA credentials instead of a 401.
+
+    Use this instead of mcp.streamable_http_app() both in production (main()) and
+    in tests so the anonymous middleware is active when needed.
+    """
+    app = mcp.streamable_http_app()
+    verifier = getattr(mcp, "_allow_anonymous_verifier", _MISSING)
+    if verifier is not _MISSING:
+        from .auth.anonymous import AnonymousPermitMiddleware
+        app.add_middleware(AnonymousPermitMiddleware, verifier=verifier)
+    return app
 
 
 def main() -> None:  # pragma: no cover
@@ -236,7 +283,15 @@ def main() -> None:  # pragma: no cover
             env_file=config_path,
         )
         if args.transport == "http":
-            await mcp.run_streamable_http_async()
+            import uvicorn
+            starlette_app = build_http_app(mcp)
+            uv_config = uvicorn.Config(
+                starlette_app,
+                host=args.host,
+                port=args.port,
+                log_level="debug" if cfg.debug else "info",
+            )
+            await uvicorn.Server(uv_config).serve()
         else:
             await mcp.run_stdio_async()
 

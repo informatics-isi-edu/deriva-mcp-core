@@ -34,6 +34,14 @@ The server must be registered as a confidential client in Credenza with:
 - `authorization_code`, `token_exchange`, and `client_credentials` grant types
 - The MCP server URL as the allowed resource
 
+**Anonymous / zero-auth mode:** Set `DERIVA_MCP_ALLOW_ANONYMOUS=true` to allow
+unauthenticated requests. Requests without an `Authorization` header are processed
+with empty DERIVA credentials (equivalent to public/anonymous catalog access) and
+with mutations blocked. A provided but invalid token is still rejected with 401.
+When `DERIVA_MCP_CREDENZA_URL` is also set, authenticated and anonymous requests
+are both supported (mixed mode). When `DERIVA_MCP_CREDENZA_URL` is not set,
+all Credenza fields become optional and the server operates in anonymous-only mode.
+
 ---
 
 ## Docker Compose (deriva-docker)
@@ -204,21 +212,21 @@ location = /.well-known/oauth-protected-resource/mcp {
 
 ```ini
 [Unit]
-Description=deriva-mcp-core MCP server
-After=network.target
+Description = deriva-mcp-core MCP server
+After = network.target
 
 [Service]
-Type=simple
-User=deriva-mcp
-EnvironmentFile=/etc/deriva-mcp/deriva-mcp.env
-ExecStart=/opt/deriva-mcp/bin/deriva-mcp-core --transport http --host 127.0.0.1 --port 8000
-Restart=on-failure
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
+Type = simple
+User = deriva-mcp
+EnvironmentFile = /etc/deriva-mcp/deriva-mcp.env
+ExecStart = /opt/deriva-mcp/bin/deriva-mcp-core --transport http --host 127.0.0.1 --port 8000
+Restart = on-failure
+RestartSec = 5
+StandardOutput = journal
+StandardError = journal
 
 [Install]
-WantedBy=multi-user.target
+WantedBy = multi-user.target
 ```
 
 ```bash
@@ -415,7 +423,10 @@ required for HTTP transport. Use stdio transport instead, configured in
       "deriva": {
         "type": "stdio",
         "command": "deriva-mcp-core",
-        "args": ["--transport", "stdio"],
+        "args": [
+          "--transport",
+          "stdio"
+        ],
         "env": {
           "DERIVA_MCP_DISABLE_MUTATING_TOOLS": "false"
         },
