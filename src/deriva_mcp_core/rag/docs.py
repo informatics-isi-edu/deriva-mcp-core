@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 from .chunker import chunk_markdown
-from .crawler import GitHubCrawler
+from .github_crawler import GitHubCrawler
 
 if TYPE_CHECKING:
     from .config import RAGSettings

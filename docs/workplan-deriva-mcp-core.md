@@ -1783,6 +1783,287 @@ use it without reaching into `context` directly.
 
 ---
 
+## Planned: Phase 7 -- Generalized RAG Sources
+
+**Status:** Design only.
+
+### Motivation
+
+The current RAG subsystem indexes only GitHub-hosted Markdown. Two additional
+source types are needed for real deployments:
+
+1. **Web crawler sources** -- index the public-facing website for a DERIVA
+   deployment (e.g., `https://www.facebase.org`). A prototype of this pattern
+   exists in `fb-chatbot/facebase_crawler.py`.
+
+2. **Local filesystem sources** -- ingest pre-processed Markdown or JSON chunk
+   files from the local filesystem. Operators who run an offline crawl or
+   generate documentation via a CI pipeline can drop the output into a watched
+   directory without needing a live HTTP crawl at server startup.
+
+Together these unblock two concrete use cases:
+
+- Indexing the FaceBase public site for a `deriva-facebase` plugin (see below).
+- Importing pre-built indexes from any external tool without modifying core code.
+
+---
+
+### 7.1 Web Crawler Source (`rag/web_crawler.py`)
+
+A new `WebCrawler` class alongside `GitHubCrawler`. Uses `httpx` (already a
+dep) + `beautifulsoup4` (new dep, add to `rag` extra in `pyproject.toml`).
+
+**`WebSource` dataclass (`rag/docs.py`)**
+
+```python
+@dataclass
+class WebSource:
+    name: str  # unique source identifier
+    base_url: str  # crawl root (e.g., "https://www.facebase.org")
+    max_pages: int  # crawl limit; None = unlimited
+    doc_type: str = "web-content"
+    allowed_domains: list[str] = field(default_factory=list)  # empty = base_url domain only
+    include_path_prefix: str = ""  # only index URLs under this prefix (optional filter)
+```
+
+**`WebCrawler` class (`rag/web_crawler.py`)**
+
+- BFS over the site starting from `base_url`.
+- Fetches pages with `httpx.AsyncClient`; respects `Content-Type: text/html`.
+- HTML extraction: remove `script`, `style`, `nav`, `header`, `footer`; extract
+  title + main content selectors (`main`, `article`, `.content`, etc.); fall
+  back to `body`. Same approach as `fb-chatbot/facebase_crawler.py`.
+- Dedup by MD5 hash of extracted text -- different URLs with the same content
+  (common in Chaise facet URLs) produce one chunk set.
+- Recursive path loop detection: skip URLs where any path segment appears more
+  than twice, or where path depth exceeds a configurable limit (default 10).
+- Rate limiting: `await asyncio.sleep(rate_limit_seconds)` between requests
+  (default 1.0 s). Configurable per source.
+- Source key: `{source.name}:{url}` for chunk `source` field (parallel to
+  `{github_source.name}:{file_path}` for GitHub sources).
+- Incremental update: URL-to-content-hash map cached in
+  `{source_name}_url_cache.json` in the data dir. Only re-fetches URLs whose
+  hash has changed.
+- Does NOT respect `robots.txt` by default (operators control what they index);
+  add optional `respect_robots: bool = True` flag.
+
+**`RAGDocsManager.ingest_web(source: WebSource, force: bool)`**
+
+Parallel to `ingest()` -- crawl + chunk + upsert. Text extracted from HTML is
+chunked with `chunk_markdown()` (works fine on plain prose; treats the extracted
+text as a single document). Title is prepended as an H1 to preserve page context.
+
+**Plugin API extension (`plugin/api.py`)**
+
+New `RagWebSourceDeclaration` dataclass + `ctx.rag_web_source()` method:
+
+```python
+ctx.rag_web_source(
+    name="facebase-web",
+    base_url="https://www.facebase.org",
+    max_pages=500,
+    doc_type="web-content",
+)
+```
+
+The startup loop in `rag/tools.py` picks up web sources from `ctx._rag_web_sources`
+alongside GitHub and local sources.
+
+---
+
+### 7.2 Local Filesystem Source (`rag/local_source.py`)
+
+Ingests `.md` and `.txt` files from a local directory tree.
+
+**`LocalSource` dataclass (`rag/docs.py`)**
+
+```python
+@dataclass
+class LocalSource:
+    name: str
+    path: str  # absolute or relative path to directory or single file
+    glob: str = "**/*.md"
+    doc_type: str = "user-guide"
+    encoding: str = "utf-8"
+```
+
+**Ingest logic**
+
+- Walk `Path(source.path).glob(source.glob)`.
+- Use file mtime (ISO string) as the change-detection key instead of a Git SHA.
+- Source key: `{source.name}:{relative_path}`.
+- Cached in `{source_name}_mtime_cache.json`.
+- Chunk with `chunk_markdown()`.
+
+**Plugin API**
+
+```python
+ctx.rag_local_source(
+    name="my-site-docs",
+    path="/data/docs/exported",
+    glob="**/*.md",
+    doc_type="user-guide",
+)
+```
+
+**`rag_update_docs` tool extension**
+
+When a source name is given, `rag_update_docs` dispatches to the right ingest
+method based on source type (GitHub, web, or local). The source registry in
+`docs_manager` needs to be unified so all three types are looked up by name.
+
+---
+
+### 7.3 `rag_import_chunks` Tool
+
+One-shot bulk import from a pre-built JSON chunk file. Designed for operators
+who run an offline crawl or ETL pipeline and produce a standard chunk export.
+
+**Input format** (JSON array):
+
+```json
+[
+  {
+    "text": "...",
+    "source": "facebase-web:https://www.facebase.org/about",
+    "doc_type": "web-content",
+    "chunk_index": 0,
+    "metadata": {}
+  },
+  ...
+]
+```
+
+**Tool signature**
+
+```python
+async def rag_import_chunks(
+        file_path: str,
+        source_name: str | None = None,  # if provided, override source field in all chunks
+        doc_type: str | None = None,  # if provided, override doc_type in all chunks
+        replace: bool = False,  # if True, delete_source() before upsert
+) -> str:
+    ...
+```
+
+Returns `{"status": "imported", "chunk_count": N}`.
+
+This directly accommodates the `fb-chatbot` pattern where `facebase_crawler.py`
+produces a pre-built index that can be loaded into the core vector store without
+re-crawling at runtime.
+
+---
+
+### 7.4 Built-in Prompts and Resources
+
+**Status:** Design only.
+
+#### Motivation
+
+MCP prompts and resources provide a different interaction surface from tools:
+
+- **Resources** are read-accessible URIs -- the LLM can request them directly
+  via `read_resource()` without a tool call. Good for relatively stable,
+  reference-like data (schema, server config).
+- **Prompts** are named workflow guides returned as structured message lists.
+  Good for domain workflows where the LLM needs step-by-step guidance rather
+  than raw capability.
+
+`PluginContext` already exposes `ctx.resource()` and `ctx.prompt()` pass-through
+decorators. Core registers none of its own yet.
+
+#### Built-in resources (`tools/resources.py`, new file)
+
+| URI                                                               | Content                                                 | Notes                                    |
+|-------------------------------------------------------------------|---------------------------------------------------------|------------------------------------------|
+| `deriva://server/status`                                          | JSON: version, enabled features, auth mode, RAG backend | static at startup                        |
+| `deriva://catalog/{hostname}/{catalog_id}/schema`                 | Full ERMrest schema JSON                                | re-fetched on access; uses get_catalog() |
+| `deriva://catalog/{hostname}/{catalog_id}/tables`                 | JSON list of `{schema, table, comment}`                 | derived from schema                      |
+| `deriva://catalog/{hostname}/{catalog_id}/table/{schema}/{table}` | Table definition JSON (columns, FKs, annotations)       | derived from schema                      |
+
+Resources use the same `get_catalog()` + credential flow as tools. Schema
+resources are naturally cached by the RAG subsystem if RAG is enabled.
+
+#### Built-in prompts (`tools/prompts.py`, new file)
+
+| Name              | Description                                                                                |
+|-------------------|--------------------------------------------------------------------------------------------|
+| `explore-catalog` | Step-by-step guide: list schemas, list tables, inspect a table, run a sample query         |
+| `query-catalog`   | Guide to building ERMrest queries: entity path, attribute projection, filters, sort, limit |
+| `annotate-table`  | Guide to setting display annotations (visible columns, display names) via annotation tools |
+
+Prompts return a list of `PromptMessage` objects (user + assistant turns) as
+expected by the MCP SDK. They do not require tool calls to render -- they are
+static workflow text.
+
+Both `tools/resources.py` and `tools/prompts.py` are registered via
+`register(ctx)` functions called from `server.py` alongside the existing tool
+modules.
+
+---
+
+## Planned: deriva-facebase-mcp-plugin Plugin (Design Note)
+
+**Repo:** `deriva-facebase-mcp-plugin` (separate package, separate repo)
+
+A site-specific plugin for the FaceBase deployment that uses the generalized RAG
+primitives from Phase 7 and adds FaceBase-specific tools, resources, and prompts.
+
+Inspired by the proof-of-concept in `fb-chatbot/` (facebase_crawler.py,
+facebase_chatbot.py).
+
+### RAG sources
+
+```python
+def register(ctx: PluginContext) -> None:
+    # Public website content
+    ctx.rag_web_source(
+        name="facebase-web",
+        base_url="https://www.facebase.org",
+        max_pages=500,
+        doc_type="web-content",
+    )
+    # Dataset records with vocabulary terms and contributors
+    ctx.on_catalog_connect(_index_facebase_datasets)
+```
+
+`_index_facebase_datasets` is an `on_catalog_connect` hook that fires when the
+FaceBase catalog is first accessed. It runs a variant of `FaceBaseDataBaseCrawler`
+using `get_catalog()` + the existing credential flow -- no hardcoded hostname or
+credential. It formats each dataset as a Markdown document (same template as
+`facebase_crawler.py:FaceBaseDataBaseCrawler.extract_content`) and upserts via
+`store.upsert(chunks)`.
+
+This is structurally identical to the existing `_handle_catalog_connect` hook
+in `rag/tools.py` that indexes schema -- the same fire-and-forget pattern, but
+for dataset records.
+
+### FaceBase-specific prompts
+
+```python
+ctx.prompt("facebase-assistant")(...)  # returns the system prompt from facebase_chatbot.py
+ctx.prompt("find-datasets")(...)  # step-by-step guide to querying isa:dataset
+ctx.prompt("explore-anatomy")(...)  # guide to browsing vocab:anatomy and linked datasets
+```
+
+### FaceBase-specific resources
+
+```python
+ctx.resource("deriva://facebase/projects")(...)  # list active FaceBase projects
+ctx.resource("deriva://facebase/dataset/{rid}")(...)  # dataset detail with vocab terms
+ctx.resource("deriva://facebase/anatomy/{name}")(...)  # anatomy term + linked datasets
+```
+
+### FaceBase-specific tools (if needed)
+
+Generic `get_entities` + `rag_search` cover most queries. FaceBase-specific
+tools would only be added if they handle a pattern that generic tools cannot:
+for example, a `get_dataset_summary` tool that fetches the dataset record plus
+all associated vocabulary terms in a single formatted response (the multi-join
+pattern from `FaceBaseDataBaseCrawler`).
+
+---
+
 ## Out of Scope
 
 - Backward compatibility with `deriva-mcp` prototype
