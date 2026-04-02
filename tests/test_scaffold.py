@@ -33,7 +33,7 @@ def test_package_imports() -> None:
         "deriva_mcp_core.rag.config",
         "deriva_mcp_core.rag.store",
         "deriva_mcp_core.rag.chunker",
-        "deriva_mcp_core.rag.crawler",
+        "deriva_mcp_core.rag.github_crawler",
         "deriva_mcp_core.rag.docs",
         "deriva_mcp_core.rag.schema",
         "deriva_mcp_core.rag.data",

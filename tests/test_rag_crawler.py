@@ -1,4 +1,4 @@
-"""Unit tests for rag/crawler.py and rag/docs.py."""
+"""Unit tests for rag/github_crawler.py and rag/docs.py."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from deriva_mcp_core.rag.crawler import FileEntry, GitHubCrawler
+from deriva_mcp_core.rag.github_crawler import FileEntry, GitHubCrawler
 from deriva_mcp_core.rag.docs import DocSource, RAGDocsManager
 from deriva_mcp_core.rag.store import Chunk
 
