@@ -677,7 +677,7 @@ rag = [
 requires-dist = [
     { name = "asyncpg", marker = "extra == 'rag'", specifier = ">=0.29" },
     { name = "chevron" },
-    { name = "chromadb", marker = "extra == 'rag'", specifier = ">=0.5" },
+    { name = "chromadb", marker = "extra == 'rag'", specifier = ">=1.0,<2" },
     { name = "deriva", git = "https://github.com/informatics-isi-edu/deriva-py?branch=master" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", specifier = ">=1.9.0" },

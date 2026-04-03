@@ -173,7 +173,22 @@ class ChromaVectorStore(VectorStore):
             import os
 
             path = os.path.expanduser(self._settings.chroma_dir)
-            self._client = chromadb.PersistentClient(path=path)
+            try:
+                self._client = chromadb.PersistentClient(path=path)
+            except (ValueError, AttributeError):
+                # Storage format incompatible with current ChromaDB version
+                # (e.g. RustBindingsAPI migration). Wipe and recreate --
+                # RAG data is re-crawlable so this is safe.
+                import shutil
+
+                logger.warning(
+                    "ChromaDB storage at %s is corrupt or incompatible; "
+                    "removing and reinitializing",
+                    path,
+                )
+                shutil.rmtree(path, ignore_errors=True)
+                os.makedirs(path, exist_ok=True)
+                self._client = chromadb.PersistentClient(path=path)
 
         self._collection = self._client.get_or_create_collection(
             name=self._COLLECTION,

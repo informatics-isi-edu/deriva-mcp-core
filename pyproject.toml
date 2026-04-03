@@ -35,7 +35,7 @@ dependencies = [
 
 [project.optional-dependencies]
 rag = [
-    "chromadb>=0.5",
+    "chromadb>=1.0,<2",
     "asyncpg>=0.29",
 ]
 dev = [

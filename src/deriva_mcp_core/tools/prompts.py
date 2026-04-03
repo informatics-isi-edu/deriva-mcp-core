@@ -144,6 +144,18 @@ are returned (/* is appended automatically -- do NOT add it yourself).
 Columns from aliased tables: "alias:ColumnName"
 Column aliases in the URL: "out_name:=ColumnName"
 
+IMPORTANT: ERMrest does NOT support schema:table:column syntax in attributes.
+If your path spans multiple tables and you need columns from a non-final table,
+you MUST assign aliases in the path and use alias:Column in attributes.
+
+  WRONG (will fail with 400, ILLUSTRATIVE ONLY):
+    path="Data:Study/Data:Experiment/Data:File"
+    attributes=["Data:Study:RID", "Data:Study:Title"]
+
+  CORRECT (ILLUSTRATIVE ONLY):
+    path="s:=Data:Study/Data:Experiment/Data:File"
+    attributes=["s:RID", "s:Title"]
+
 PAGINATION
 ----------
 Use cursor-based pagination with `limit` and `after_rid`:

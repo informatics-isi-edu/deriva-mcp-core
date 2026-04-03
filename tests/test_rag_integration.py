@@ -226,6 +226,46 @@ class TestChromaVectorStore:
         assert all(r.doc_type == "schema" for r in results)
 
 
+class TestChromaRecovery:
+    def test_corrupt_storage_is_wiped_and_recreated(self, tmp_path):
+        """PersistentClient failure triggers wipe-and-recreate."""
+        from deriva_mcp_core.rag.store import ChromaVectorStore
+
+        chroma_dir = tmp_path / "chroma"
+        chroma_dir.mkdir()
+        # Write garbage to simulate incompatible on-disk format
+        (chroma_dir / "chroma.sqlite3").write_text("corrupt")
+
+        settings = _chroma_settings(tmp_path)
+        settings.chroma_dir = str(chroma_dir)
+        store = ChromaVectorStore(settings)
+
+        # _ensure_client should recover, not raise
+        import chromadb
+
+        # Force a fresh client by corrupting the path further --
+        # PersistentClient may or may not fail on the garbage file above
+        # depending on the ChromaDB version. To reliably test the recovery
+        # path, patch PersistentClient to fail on first call.
+        original = chromadb.PersistentClient
+        call_count = 0
+
+        def _failing_then_ok(path):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ValueError("Could not connect to tenant default_tenant")
+            return original(path=path)
+
+        import unittest.mock
+
+        with unittest.mock.patch("chromadb.PersistentClient", side_effect=_failing_then_ok):
+            store._ensure_client()
+
+        assert store._client is not None
+        assert store._collection is not None
+
+
 # ---------------------------------------------------------------------------
 # Schema indexing -- visibility class deduplication
 # ---------------------------------------------------------------------------

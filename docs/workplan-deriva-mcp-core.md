@@ -1869,6 +1869,49 @@ ctx.rag_web_source(
 The startup loop in `rag/tools.py` picks up web sources from `ctx._rag_web_sources`
 alongside GitHub and local sources.
 
+**Dataset enrichment hooks (`ctx.rag_dataset_indexer()`)**
+
+Plugins can declare tables whose rows should be FK-enriched and indexed at catalog
+connect time, without writing the `on_catalog_connect` + `index_table_data()` boilerplate
+themselves. This is a declarative layer on top of the existing `index_table_data()` and
+`RowSerializer` primitives.
+
+```python
+ctx.rag_dataset_indexer(
+    schema="isa",
+    table="dataset",
+    filter={"released": True},
+    enricher=enrich_dataset,
+    doc_type="catalog-data",
+)
+
+
+async def enrich_dataset(row: dict, catalog) -> str:
+    """Follow FKs from a dataset row and return rich Markdown."""
+    # e.g., fetch project, contributors, vocab terms via catalog.get()
+    ...
+```
+
+The enricher function receives a single row dict and an authenticated catalog handle,
+and returns a Markdown string. The framework handles:
+
+- Fetching filtered rows from the declared table at connect time
+- Calling the enricher per row
+- Chunking the returned Markdown
+- Upserting into the RAG store scoped to the catalog and user
+- Staleness detection (skip re-indexing if the row RMT has not changed)
+
+This pattern is inspired by `fb-chatbot/facebase_crawler.py`, which followed FKs from
+`isa:dataset` to pull in project names, contributors, and vocabulary terms with synonyms,
+composing a rich Markdown document per dataset. The declarative hook generalizes this
+so any plugin can do the same for its domain tables.
+
+The enrichment hooks are collected in `ctx._rag_dataset_indexers` and executed by the
+`on_catalog_connect` handler in `rag/tools.py`, after schema indexing completes.
+
+This is a companion to the mcp-ui Phase 10 RAG-only mode -- the quality of RAG-only
+answers depends directly on the richness of the indexed content.
+
 ---
 
 ### 7.2 Local Filesystem Source (`rag/local_source.py`)
