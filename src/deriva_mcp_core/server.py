@@ -349,7 +349,7 @@ def main() -> None:  # pragma: no cover
                 host=args.host,
                 port=args.port,
                 log_level="debug" if cfg.debug else "info",
-                access_log=False,
+                log_config=None,
             )
             await uvicorn.Server(uv_config).serve()
         else:
