@@ -263,6 +263,23 @@ def test_anonymous_health_endpoint_accessible():
     assert resp.json() == {"status": "ok"}
 
 
+def test_health_probe_does_not_audit(monkeypatch):
+    """/health requests should not emit anonymous_access audit events."""
+    from unittest.mock import MagicMock
+
+    mock_audit = MagicMock()
+    monkeypatch.setattr("deriva_mcp_core.auth.anonymous.audit_event", mock_audit)
+
+    mcp = create_server(transport="http", settings=_anon_settings())
+    app = build_http_app(mcp)
+    client = TestClient(app)
+    client.get("/health")
+
+    # audit_event should not have been called with "anonymous_access"
+    for call in mock_audit.call_args_list:
+        assert call.args[0] != "anonymous_access"
+
+
 # ---------------------------------------------------------------------------
 # validate_for_http with allow_anonymous
 # ---------------------------------------------------------------------------

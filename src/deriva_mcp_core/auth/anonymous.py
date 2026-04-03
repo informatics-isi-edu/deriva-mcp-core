@@ -81,7 +81,10 @@ class AnonymousPermitMiddleware:
                 set_current_credential({})
                 set_current_user_id("anonymous")
                 set_mutation_allowed(False)
-                audit_event("anonymous_access")
+                # Skip audit for health probes to avoid log noise
+                path = scope.get("path", "")
+                if path != "/health":
+                    audit_event("anonymous_access")
 
         await self.app(scope, receive, send)
 

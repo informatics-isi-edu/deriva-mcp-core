@@ -114,6 +114,10 @@ class Settings(BaseSettings):
     audit_logfile_path: str = "deriva-mcp-audit.log"
     audit_use_syslog: bool = False
 
+    # Access logging (uvicorn request log)
+    access_logfile_path: str = "deriva-mcp-access.log"
+    access_use_syslog: bool = False
+
     # Safety
     disable_mutating_tools: bool = True
 
@@ -145,6 +149,11 @@ class Settings(BaseSettings):
     mutation_required_claim: dict[str, Any] | None = None
 
     # Logging
+    # Enable Python SysLogHandler for app logs (LOCAL1).  Leave False when
+    # running under Docker with driver: syslog (compose handles forwarding).
+    # Set True for non-Docker deployments where syslog is the only path to
+    # a centralized log collector.
+    app_use_syslog: bool = False
     debug: bool = False
 
     # TLS verification for outbound httpx calls (Credenza, ERMrest, Hatrac).
