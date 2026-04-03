@@ -20,6 +20,7 @@ import json
 import logging
 import re
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 from . import fmt_exc
 from ..context import deriva_call, get_catalog
@@ -154,6 +155,22 @@ async def _entity_error(
     return result
 
 
+def _build_filter_segment(filters: dict[str, Any]) -> str:
+    """Build an ERMrest filter path segment from a column-value dict.
+
+    Handles scalar values and list values (using ERMrest any() syntax).
+    All values are URL-encoded for safe inclusion in the path.
+    """
+    parts: list[str] = []
+    for col, val in filters.items():
+        if isinstance(val, list):
+            encoded = ",".join(quote(str(v), safe="") for v in val)
+            parts.append(f"/{col}=any({encoded})")
+        else:
+            parts.append(f"/{col}={quote(str(val), safe='')}")
+    return "".join(parts)
+
+
 def register(ctx: PluginContext) -> None:
     """Register entity CRUD tools with the MCP server."""
 
@@ -199,7 +216,7 @@ def register(ctx: PluginContext) -> None:
 
                 filter_seg = ""
                 if filters:
-                    filter_seg = "".join(f"/{k}={v}" for k, v in filters.items())
+                    filter_seg = _build_filter_segment(filters)
 
                 if preflight_count:
                     # Count only -- never fetch entities on a preflight call.

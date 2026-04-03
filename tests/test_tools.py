@@ -654,6 +654,40 @@ class TestCatalogTools:
 # ---------------------------------------------------------------------------
 
 
+class TestBuildFilterSegment:
+    """Unit tests for _build_filter_segment helper."""
+
+    def test_scalar_value(self):
+        from deriva_mcp_core.tools.entity import _build_filter_segment
+
+        assert _build_filter_segment({"Status": "active"}) == "/Status=active"
+
+    def test_list_value_uses_any(self):
+        from deriva_mcp_core.tools.entity import _build_filter_segment
+
+        result = _build_filter_segment({"RID": ["A", "B", "C"]})
+        assert result == "/RID=any(A,B,C)"
+
+    def test_url_encodes_special_chars(self):
+        from deriva_mcp_core.tools.entity import _build_filter_segment
+
+        result = _build_filter_segment({"Name": "a b/c"})
+        assert result == "/Name=a%20b%2Fc"
+
+    def test_url_encodes_list_values(self):
+        from deriva_mcp_core.tools.entity import _build_filter_segment
+
+        result = _build_filter_segment({"Name": ["a b", "c/d"]})
+        assert result == "/Name=any(a%20b,c%2Fd)"
+
+    def test_multiple_filters(self):
+        from deriva_mcp_core.tools.entity import _build_filter_segment
+
+        result = _build_filter_segment({"Status": "active", "RID": ["X", "Y"]})
+        assert "/Status=active" in result
+        assert "/RID=any(X,Y)" in result
+
+
 class TestEntityTools:
     def _register(self, ctx):
         from deriva_mcp_core.tools import entity
@@ -682,6 +716,18 @@ class TestEntityTools:
             await tools["get_entities"]("h", "1", "public", "MyTable", filters={"Status": "active"})
         url = mock_catalog.get.call_args[0][0]
         assert "/Status=active" in url
+        assert "@sort(RID)" in url
+
+    async def test_get_entities_with_list_filter(self, ctx, mock_catalog):
+        """List filter values use ERMrest any() syntax."""
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog):
+            await tools["get_entities"](
+                "h", "1", "public", "MyTable",
+                filters={"RID": ["16-3EMJ", "16-CVJ6", "16-CVJG"]},
+            )
+        url = mock_catalog.get.call_args[0][0]
+        assert "/RID=any(16-3EMJ,16-CVJ6,16-CVJG)" in url
         assert "@sort(RID)" in url
 
     async def test_get_entities_limit_capped(self, ctx, mock_catalog):
