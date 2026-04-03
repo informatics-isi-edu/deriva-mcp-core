@@ -33,59 +33,24 @@ def register(ctx: PluginContext) -> None:
     ) -> str:
         """Run an ERMREST attribute query.
 
+        See ERMREST QUERY GUIDE for path syntax, pagination, and result
+        interpretation.
+
         Returns selected columns from an ERMREST path expression. Use this for
-        multi-table path traversals, column projections, fine-grained filtering,
-        and cursor-based pagination beyond get_entities.
-
-        The `path` is an ERMREST path string relative to /attribute/, e.g.:
-            "isa:Dataset"                      -- all rows from isa:Dataset
-            "isa:Dataset/Status=released"      -- filtered rows
-            "isa:Dataset/isa:Execution"        -- joined tables
-
-        IMPORTANT: ERMrest requires a column projection after the final path
-        element. When `attributes` is omitted, `/*` is appended automatically
-        so all columns are returned. Do NOT include `/*` in the path yourself --
-        it will be appended for you when attributes is None.
-
-        The `attributes` list selects specific columns to return, e.g.:
-            ["RID", "Name", "Status"]
-
-        Cursor-based pagination for large result sets:
-            ERMrest RIDs are monotonically assigned, so @sort(RID)@after(last_rid)
-            provides stable cursor-based pagination. Use `limit` to set page size
-            and `after_rid` to advance the cursor to the next page.
-
-            IMPORTANT: @sort and @after must appear AFTER the column projection in
-            ERMrest attribute URLs. Always use the after_rid and limit parameters
-            rather than embedding @sort/@after in the path string directly.
-
-                Page 1: path="isa:Dataset", limit=50              (no after_rid)
-                Page 2: path="isa:Dataset", limit=50, after_rid="LAST_RID"
-                Page 3: path="isa:Dataset", limit=50, after_rid="LAST_RID"
-
-            Replace LAST_RID with the RID of the last row from the previous page.
-            Use the same path and attributes on every page. Stop when count < limit.
-            For simple whole-entity pagination (no column projection or joins),
-            get_entities also supports after_rid directly.
+        multi-table joins, column projections, and cursor-based pagination.
 
         Args:
-            hostname: Hostname of the DERIVA server.
-            catalog_id: Catalog ID, alias, or compound ID@snaptime for historical
-                snapshot access. The snaptime must be a Crockford base32 string --
-                never a plain date. Call resolve_snaptime first to convert a date.
-            path: ERMREST path string (without the /attribute/ prefix or trailing /*).
-                Do NOT embed @sort or @after in the path; use the dedicated params.
-            attributes: Columns to return. If omitted, all columns are returned.
-            limit: Maximum rows to return (passed as ?limit=N query parameter).
-                Use this to control page size for cursor-based pagination.
-            after_rid: When set, adds @sort(RID)@after(after_rid) after the column
-                projection to advance the cursor to the next page. Set this to the
-                RID of the last row from the previous page.
+            hostname: DERIVA server hostname.
+            catalog_id: Catalog ID, alias, or ID@snaptime (Crockford base32 --
+                call resolve_snaptime to convert a date).
+            path: ERMREST path relative to /attribute/ (e.g. "isa:Dataset/Status=released").
+                Do NOT embed @sort/@after or trailing /* in the path.
+            attributes: Columns to return. Omit for all columns.
+            limit: Max rows (page size for cursor-based pagination).
+            after_rid: RID of last row from previous page to advance cursor.
 
-        Display rules: always show RID. Omit ERMrest system columns RCT, RMT,
-        RCB, RMB unless the user explicitly asks for them. Show ALL remaining
-        columns in results, including those whose values are entirely null --
-        never hide a column because its values are null.
+        Empty result sets are valid -- 0 rows means the query is correct but
+        no data matches. Do NOT retry expecting different results.
         """
         try:
             with deriva_call():
@@ -124,18 +89,12 @@ def register(ctx: PluginContext) -> None:
     ) -> str:
         """Count rows in a table, with optional equality filters.
 
-        Shorthand for a single-aggregate ERMrest query that returns
-        the row count as a plain integer. Equivalent to calling
-        query_aggregate with "cnt:=cnt(RID)" but with a simpler interface.
-
-        Optional `filters` is a dict of {column: value} equality constraints.
-        Each pair is appended to the URL as an ERMrest filter predicate.
+        See ERMREST QUERY GUIDE for path syntax and result interpretation.
 
         Args:
-            hostname: Hostname of the DERIVA server.
-            catalog_id: Catalog ID, alias, or compound ID@snaptime for historical
-                snapshot access. The snaptime must be a Crockford base32 string --
-                never a plain date. Call resolve_snaptime first to convert a date.
+            hostname: DERIVA server hostname.
+            catalog_id: Catalog ID, alias, or ID@snaptime (Crockford base32 --
+                call resolve_snaptime to convert a date).
             schema: Schema name.
             table: Table name.
             filters: Optional equality filters, e.g. {"Status": "released"}.
@@ -170,22 +129,16 @@ def register(ctx: PluginContext) -> None:
     ) -> str:
         """Run an ERMREST aggregate query.
 
-        Returns computed aggregate values over an ERMREST path expression.
-        Aggregate expressions follow ERMREST syntax:
-            "cnt:=cnt(RID)"        -- row count
-            "avg_age:=avg(Age)"    -- average of Age column
-            "max_ts:=max(RCT)"     -- maximum value
+        See ERMREST QUERY GUIDE for path syntax and aggregate expressions.
 
-        The `path` is an ERMREST path string relative to /aggregate/, e.g.:
-            "isa:Dataset"
-            "isa:Dataset/Status=released"
+        Returns computed aggregate values over an ERMREST path expression.
+        Expressions use ERMrest syntax, e.g. "cnt:=cnt(RID)", "avg_val:=avg(Age)".
 
         Args:
-            hostname: Hostname of the DERIVA server.
-            catalog_id: Catalog ID, alias, or compound ID@snaptime for historical
-                snapshot access. The snaptime must be a Crockford base32 string --
-                never a plain date. Call resolve_snaptime first to convert a date.
-            path: ERMREST path string (without the /aggregate/ prefix).
+            hostname: DERIVA server hostname.
+            catalog_id: Catalog ID, alias, or ID@snaptime (Crockford base32 --
+                call resolve_snaptime to convert a date).
+            path: ERMREST path relative to /aggregate/.
             aggregates: List of aggregate expressions.
         """
         try:

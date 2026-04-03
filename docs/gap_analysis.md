@@ -1,6 +1,6 @@
 # Gap Analysis: deriva-mcp prototype vs deriva-mcp-core
 
-**Date:** 2026-03-27 (updated; original 2026-03-25)
+**Date:** 2026-04-03 (updated; original 2026-03-25)
 
 **Prototype:** `deriva-mcp` (DerivaML MCP Server)
 
@@ -36,7 +36,7 @@ covering what core has introduced that the prototype never had.
     - 3.9 Annotation Gaps
     - 3.10 Data Access Gaps
     - 3.11 RAG Tool Gaps
-    - 3.12 Resources and Prompts (all absent)
+    - 3.12 Resources and Prompts
 4. [Addendum -- In Core, Absent from Prototype](#4-addendum----in-core-absent-from-prototype)
 
 ---
@@ -454,11 +454,10 @@ at runtime without redeploying. **DONE (Phase 5.6.5)** -- both tools persist cha
 `sources.json`; the built-in `ctx.rag_source()` registration path remains for plugins
 that declare sources statically at startup.
 
-### 3.12 Resources and Prompts (all absent)
+### 3.12 Resources and Prompts
 
 The prototype registers a rich set of MCP resources and prompts that provide the LLM with
-read-only context about the server and catalog state without consuming tool calls. Core
-registers no resources or prompts.
+read-only context about the server and catalog state without consuming tool calls.
 
 **Prototype MCP resources (`resources.py`):**
 
@@ -478,18 +477,40 @@ registers no resources or prompts.
 | `deriva://docs/ermrest`         | Dynamic  | Fetched from GitHub (ermrest docs)                 |
 | `deriva://docs/chaise`          | Dynamic  | Fetched from GitHub (chaise docs)                  |
 
+Core registers no resources. The prototype's dynamic catalog resources (schema, tables,
+vocabularies) are partially covered by core's schema introspection tools and RAG system,
+but not as MCP resources. The DerivaML-specific resources (datasets, workflows, configs)
+belong in a future DerivaML plugin.
+
 **Prototype MCP prompts (`prompts.py`):**
 
 The prototype ships extensive MCP prompts covering connection setup, dataset workflows,
-execution patterns, feature authoring, schema design, and annotation guidance. These
-provide the LLM with structured context for common workflows and reduce the number of
-tool calls needed to orient a session. Core has no prompts.
+execution patterns, feature authoring, schema design, and annotation guidance.
 
-The absence of resources and prompts is a significant usability gap. LLMs connecting to
-core have no passive context and must discover capabilities entirely through tool
-descriptions. For a multi-user HTTP deployment this matters less (each session is
-purpose-driven), but for interactive development workflows the prototype's resources
-substantially reduce friction.
+**Core prompts (`tools/prompts.py`) -- DONE (2026-04-03):**
+
+Core now registers four guide prompts via `ctx.prompt()`:
+
+| Name               | Description                                                                          |
+|--------------------|--------------------------------------------------------------------------------------|
+| `query_guide`      | ERMrest query patterns: path syntax, filter operators, joins, pagination, aggregates |
+| `entity_guide`     | Entity CRUD: preflight count, pagination, multi-table query guardrails               |
+| `annotation_guide` | Chaise annotation patterns: context names, column/FK directives, Handlebars          |
+| `catalog_guide`    | Catalog management: snaptime format, cloning, aliases, history bounds                |
+
+These are reference-style behavioral guides organized by tool group, rather than the
+prototype's step-by-step workflow narratives. Testing with the mcp-ui chatbot showed
+that dense behavioral directives (mandatory rules, anti-pattern prevention) are more
+effective than workflow guidance. Key sections include mandatory schema-context usage,
+multi-table join guardrails, empty-result acceptance rules, and display rules.
+
+The DerivaML-specific prompts (dataset workflows, execution patterns, feature authoring)
+are absent from core by design -- they belong in a future DerivaML plugin.
+
+Server `instructions` text is also set on all three `FastMCP()` constructor calls,
+providing tool-group guidance at MCP init time.
+
+**Remaining gap:** MCP resources are not yet implemented in core.
 
 ---
 

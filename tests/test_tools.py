@@ -53,6 +53,7 @@ class _CapturingMCP:
 
     def __init__(self) -> None:
         self.tools: dict[str, Any] = {}
+        self.prompts: dict[str, Any] = {}
 
     def tool(self, **kwargs):
         def decorator(fn):
@@ -64,8 +65,11 @@ class _CapturingMCP:
     def resource(self, *args, **kwargs):
         return lambda fn: fn
 
-    def prompt(self, *args, **kwargs):
-        return lambda fn: fn
+    def prompt(self, name=None, *args, **kwargs):
+        def decorator(fn):
+            self.prompts[name or fn.__name__] = fn
+            return fn
+        return decorator
 
 
 @pytest.fixture()
@@ -3153,3 +3157,60 @@ class TestTaskTools:
             result = json.loads(await tools["cancel_task"]("no-such-id"))
         assert result["cancelled"] is False
         assert "not found" in result["reason"]
+
+
+# ---------------------------------------------------------------------------
+# Prompt tests
+# ---------------------------------------------------------------------------
+
+
+class TestPrompts:
+    """Verify that built-in MCP prompts register and return content."""
+
+    def test_prompts_registered(self, ctx, capturing_mcp):
+        from deriva_mcp_core.tools import prompts
+
+        prompts.register(ctx)
+        expected = {"query_guide", "entity_guide", "annotation_guide", "catalog_guide"}
+        assert expected == set(capturing_mcp.prompts.keys())
+
+    def test_prompt_content_nonempty(self, ctx, capturing_mcp):
+        from deriva_mcp_core.tools import prompts
+
+        prompts.register(ctx)
+        for name, fn in capturing_mcp.prompts.items():
+            text = fn()
+            assert isinstance(text, str), f"{name} did not return a string"
+            assert len(text) > 100, f"{name} content too short"
+
+    def test_query_guide_mentions_pagination(self, ctx, capturing_mcp):
+        from deriva_mcp_core.tools import prompts
+
+        prompts.register(ctx)
+        text = capturing_mcp.prompts["query_guide"]()
+        assert "PAGINATION" in text
+        assert "after_rid" in text
+
+    def test_entity_guide_mentions_preflight(self, ctx, capturing_mcp):
+        from deriva_mcp_core.tools import prompts
+
+        prompts.register(ctx)
+        text = capturing_mcp.prompts["entity_guide"]()
+        assert "PREFLIGHT" in text
+        assert "preflight_count" in text
+
+    def test_annotation_guide_mentions_contexts(self, ctx, capturing_mcp):
+        from deriva_mcp_core.tools import prompts
+
+        prompts.register(ctx)
+        text = capturing_mcp.prompts["annotation_guide"]()
+        assert "compact" in text
+        assert "detailed" in text
+
+    def test_catalog_guide_mentions_snaptime(self, ctx, capturing_mcp):
+        from deriva_mcp_core.tools import prompts
+
+        prompts.register(ctx)
+        text = capturing_mcp.prompts["catalog_guide"]()
+        assert "snaptime" in text.lower()
+        assert "Crockford" in text

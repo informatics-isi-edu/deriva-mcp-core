@@ -36,7 +36,7 @@ from .plugin.loader import load_plugins
 from .rag import register as _register_rag
 from .tasks.manager import TaskManager, _set_task_manager
 from .telemetry import init_audit_logger
-from .tools import annotation, catalog, entity, hatrac, query, schema, tasks, vocabulary
+from .tools import annotation, catalog, entity, hatrac, prompts, query, schema, tasks, vocabulary
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,9 @@ def _init_logging(debug: bool = False) -> None:  # pragma: no cover
     # Suppress per-request INFO noise from httpx/httpcore (individual fetches).
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+    # Suppress "Terminating session: None" noise from stateless-http mode.
+    logging.getLogger("mcp.server.streamable_http").setLevel(logging.WARNING)
 
     # Route the mcp and uvicorn loggers through our plain stream handler so
     # their records don't propagate to the root logger where chromadb's rich
@@ -128,6 +131,14 @@ def create_server(
     else:
         logger.info("Mutating tools are ENABLED (DERIVA_MCP_DISABLE_MUTATING_TOOLS=false).")
 
+    # Server instructions sent to clients at init time via MCP protocol.
+    _instructions = (
+        "DERIVA MCP server for catalog introspection, querying, entity CRUD, "
+        "annotation management, and file operations. Call the relevant guide "
+        "prompt (query_guide, entity_guide, annotation_guide, catalog_guide) "
+        "before your first use of each tool group in a conversation."
+    )
+
     if transport == "http":
         cfg.validate_for_http()
 
@@ -148,6 +159,7 @@ def create_server(
             # token extraction, validation, and anonymous fallback.
             mcp = FastMCP(
                 "deriva-mcp-core",
+                instructions=_instructions,
                 host=host,
                 port=port,
                 streamable_http_path="/",
@@ -163,6 +175,7 @@ def create_server(
             )
             mcp = FastMCP(
                 "deriva-mcp-core",
+                instructions=_instructions,
                 token_verifier=verifier,
                 auth=auth,
                 host=host,
@@ -175,7 +188,7 @@ def create_server(
     else:
         # stdio: read per-hostname credentials from local disk at call time
         _set_stdio_credential_fn(_get_credential)
-        mcp = FastMCP("deriva-mcp-core")
+        mcp = FastMCP("deriva-mcp-core", instructions=_instructions)
         task_manager = TaskManager(token_cache=None)
 
     _set_task_manager(task_manager)
@@ -194,7 +207,7 @@ def create_server(
     )
     _set_plugin_context(ctx)
 
-    for module in [catalog, entity, query, hatrac, vocabulary, annotation, schema, tasks]:
+    for module in [catalog, entity, query, hatrac, vocabulary, annotation, schema, tasks, prompts]:
         module.register(ctx)
 
     _register_rag(ctx, env_file=env_file)

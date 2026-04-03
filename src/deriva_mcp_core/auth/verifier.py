@@ -140,7 +140,7 @@ class CredenzaTokenVerifier:
         display = (
             result.payload.get("email") or result.payload.get("preferred_username") or result.sub
         )
-        logger.info(
+        logger.debug(
             "Authenticated: principal=%s display=%s aud=%s",
             principal,
             display,

@@ -37,6 +37,7 @@ def test_package_imports() -> None:
         "deriva_mcp_core.rag.docs",
         "deriva_mcp_core.rag.schema",
         "deriva_mcp_core.rag.data",
+        "deriva_mcp_core.tools.prompts",
     ]
     for module in modules:
         assert importlib.import_module(module) is not None, f"failed to import {module}"

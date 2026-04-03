@@ -353,42 +353,22 @@ def register(ctx: PluginContext) -> None:
         hostname: str | None = None,
         catalog_id: str | None = None,
     ) -> str:
-        """Resolve a human-readable date/time to the effective ERMrest snaptime.
+        """Resolve a human-readable date/time to an ERMrest snaptime string.
 
-        IMPORTANT: Do NOT attempt to construct an ID@snaptime compound string
-        by hand using a date string -- ERMrest snaptimes are Crockford base32-
-        encoded microsecond timestamps with dashes (e.g. "2TA-YA2D-ZDWY"),
-        not ISO dates.
-        Always call this tool first to obtain the correct snaptime, then pass
-        the returned compound_id to other tools.
+        See CATALOG TOOL GUIDE for snaptime format details and catalog
+        management patterns.
 
-        When hostname and catalog_id are provided the tool performs a server
-        round-trip to find the canonical snapshot that was in effect at the
-        specified moment. A snapshot covers the half-open interval
-        [snapshot_born, snapshot_superseded), so the returned snaptime is the
-        correct one to use for reproducible access to catalog state at that time.
+        ERMrest snaptimes are Crockford base32 timestamps (e.g. "2TA-YA2D-ZDWY"),
+        not ISO dates. Always call this tool before constructing ID@snaptime
+        compound identifiers.
 
-        Without hostname/catalog_id the tool converts the date to a probe
-        snaptime only, without canonicalization. Use the canonical form whenever
-        possible -- probe snaptimes may not correspond to an actual snapshot.
-
-        Input formats accepted for date_string:
-            - ISO-8601 datetime: "2024-01-15T12:00:00Z", "2024-01-15"
-            - Common date strings: "Jan 15 2024", "15 January 2024"
-            - Relative expressions: "yesterday", "last Monday" (via dateutil)
-            - An existing ERMrest snaptime (Crockford base32) -- validated and
-              returned as-is. Do NOT pass plain date strings here expecting
-              them to be treated as snaptimes.
-
-        Returns a JSON object with:
-            snaptime      -- Canonical ERMrest snaptime (use as catalog_id@snaptime)
-            timestamp     -- Human-readable ISO-8601 timestamp for verification
-            canonical     -- True if server-confirmed, False if probe only
-            compound_id   -- Ready-to-use catalog_id@snaptime string (when catalog_id given)
+        Provide hostname + catalog_id for a server-confirmed canonical snaptime.
+        Without them, the tool returns a probe snaptime only.
 
         Args:
-            date_string: Date, time, or existing ERMrest snaptime string.
-            hostname: Hostname of the DERIVA server (enables canonical lookup).
+            date_string: ISO date, common date string, relative expression
+                ("yesterday"), or existing Crockford base32 snaptime.
+            hostname: DERIVA server hostname (enables canonical lookup).
             catalog_id: Catalog ID or alias (enables canonical lookup).
         """
         try:
@@ -423,23 +403,15 @@ def register(ctx: PluginContext) -> None:
 
     @ctx.tool(mutates=False)
     async def get_catalog_history_bounds(hostname: str, catalog_id: str) -> str:
-        """Return the earliest and latest snapshot identifiers known to the catalog.
+        """Return the earliest and latest snapshot identifiers for a catalog.
 
-        Issues GET /ermrest/catalog/{id}/history/, which returns the full history
-        range without enumerating individual snapshots. Use this to discover what
-        time range is available before calling resolve_snaptime, so the LLM can
-        advise the user when a requested date falls outside the available history.
+        See CATALOG TOOL GUIDE for snaptime format details.
 
-        Returns a JSON object with:
-            earliest_snaptime  -- oldest snapshot identifier in the catalog
-            earliest_timestamp -- human-readable ISO-8601 timestamp for earliest
-            latest_snaptime    -- newest snapshot identifier in the catalog
-            latest_timestamp   -- human-readable ISO-8601 timestamp for latest
-            amendver           -- latest amendment identifier, or null if history
-                                  has not been administratively modified
+        Use this to discover the available history range before calling
+        resolve_snaptime.
 
         Args:
-            hostname: Hostname of the DERIVA server.
+            hostname: DERIVA server hostname.
             catalog_id: Catalog ID or alias (bare ID only, not ID@snaptime).
         """
         try:

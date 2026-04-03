@@ -291,34 +291,21 @@ def register(ctx: PluginContext) -> None:
         annotation: dict[str, Any] | None,
         column: str | None = None,
     ) -> str:
-        """Set the display annotation (tag:isrd.isi.edu,2015:display) on a table or column.
+        """Set the display annotation on a table or column.
 
-        Pass annotation=null to remove the annotation entirely.
+        See ANNOTATION TOOL GUIDE for annotation schemas, context names,
+        and Handlebars template patterns.
 
-        For common single-property operations, prefer the convenience tools:
-            set_table_display_name  -- sets {"name": "..."} on the table
-            set_column_display_name -- sets {"name": "..."} on a column
-
-        Display annotation schema:
-            {
-              "name": "string",            // display name (mutually exclusive with markdown_name)
-              "markdown_name": "string",   // markdown display name
-              "name_style": {
-                "underline_space": true,   // replace underscores with spaces
-                "title_case": true
-              },
-              "comment": "string",         // tooltip text
-              "show_null": {"*": true}     // per-context null display behavior
-            }
+        Pass annotation=null to remove. For single-property changes, prefer
+        set_table_display_name or set_column_display_name.
 
         Args:
-            hostname: Hostname of the DERIVA server.
+            hostname: DERIVA server hostname.
             catalog_id: Catalog ID or alias.
             schema: Schema name.
             table: Table name.
             annotation: Display annotation value, or null to remove.
-            column: Column name. If provided, sets annotation on the column;
-                otherwise sets it on the table.
+            column: Column name (omit to target the table).
         """
         try:
             with deriva_call():
@@ -535,30 +522,16 @@ def register(ctx: PluginContext) -> None:
         table: str,
         annotation: dict[str, Any] | None,
     ) -> str:
-        """Set the full visible-columns annotation (tag:isrd.isi.edu,2016:visible-columns).
+        """Set the full visible-columns annotation.
 
-        Replaces the entire annotation. Pass annotation=null to remove it entirely.
+        See ANNOTATION TOOL GUIDE for column directive formats and context
+        names. Replaces the entire annotation. Pass null to remove.
 
-        To add or remove a single column without replacing the full annotation:
-            Use add_visible_column or remove_visible_column instead.
-
-        Visible-columns schema:
-            {
-              "compact": [...],    // columns for list/compact view
-              "detailed": [...],   // columns for record/detailed view
-              "entry": [...],      // columns for create/edit forms
-              "filter": {"and": [...]}  // faceted search configuration
-            }
-
-        Column directive formats in context lists:
-            "column_name"                           -- simple column
-            ["schema_name", "fkey_constraint_name"] -- outbound FK as entity
-            {"source": "column_name", ...}          -- pseudo-column with options
-
-        Use list_foreign_keys to get constraint names for FK directives.
+        To add/remove a single column, use add_visible_column or
+        remove_visible_column instead.
 
         Args:
-            hostname: Hostname of the DERIVA server.
+            hostname: DERIVA server hostname.
             catalog_id: Catalog ID or alias.
             schema: Schema name.
             table: Table name.
@@ -757,28 +730,16 @@ def register(ctx: PluginContext) -> None:
         table: str,
         annotation: dict[str, Any] | None,
     ) -> str:
-        """Set the full visible-foreign-keys annotation (tag:isrd.isi.edu,2016:visible-foreign-keys).
+        """Set the full visible-foreign-keys annotation.
 
-        Replaces the entire annotation. Pass annotation=null to remove it entirely.
+        See ANNOTATION TOOL GUIDE for FK directive formats and context
+        names. Replaces the entire annotation. Pass null to remove.
 
-        To add or remove a single related table without replacing the full annotation:
-            Use add_visible_foreign_key or remove_visible_foreign_key instead.
-
-        Visible-foreign-keys schema:
-            {
-              "detailed": [...],   // related tables shown in detailed/record view
-              "*": [...]           // default for all contexts
-            }
-
-        Foreign key directive formats in context lists:
-            ["schema_name", "fkey_constraint_name"]  -- inbound FK reference
-            {"source": [...], "markdown_name": "..."}  -- pseudo-column for complex paths
-
-        Use list_foreign_keys to get constraint names (look in the "inbound" list
-        for this table's inbound foreign keys).
+        To add/remove a single FK, use add_visible_foreign_key or
+        remove_visible_foreign_key instead.
 
         Args:
-            hostname: Hostname of the DERIVA server.
+            hostname: DERIVA server hostname.
             catalog_id: Catalog ID or alias.
             schema: Schema name.
             table: Table name.
@@ -974,32 +935,14 @@ def register(ctx: PluginContext) -> None:
         table: str,
         annotation: dict[str, Any] | None,
     ) -> str:
-        """Set the full table-display annotation (tag:isrd.isi.edu,2016:table-display).
+        """Set the full table-display annotation.
 
-        Replaces the entire annotation. Pass annotation=null to remove it entirely.
-
-        For setting only the row name pattern, use set_row_name_pattern instead.
-
-        Table-display annotation schema:
-            {
-              "row_name": {
-                "row_markdown_pattern": "{{{Name}}}",  // Handlebars template for row IDs
-                "template_engine": "handlebars"
-              },
-              "compact": {
-                "page_size": 25,
-                "row_order": [{"column": "RCT", "descending": true}, "Name"]
-              },
-              "detailed": {
-                "hide_column_headers": true,
-                "collapse_toc_panel": true
-              }
-            }
-
-        Use get_handlebars_template_variables to see available column variables.
+        See ANNOTATION TOOL GUIDE for table-display schema and Handlebars
+        template patterns. Replaces the entire annotation.
+        Pass null to remove. For row_name only, use set_row_name_pattern.
 
         Args:
-            hostname: Hostname of the DERIVA server.
+            hostname: DERIVA server hostname.
             catalog_id: Catalog ID or alias.
             schema: Schema name.
             table: Table name.
@@ -1045,30 +988,14 @@ def register(ctx: PluginContext) -> None:
         column: str,
         annotation: dict[str, Any] | None,
     ) -> str:
-        """Set the full column-display annotation (tag:isrd.isi.edu,2016:column-display).
+        """Set the full column-display annotation on a column.
 
-        Replaces the entire annotation on the column. Pass annotation=null to remove it.
-
-        For setting only the column display name, use set_column_display_name instead.
-
-        Column-display annotation schema:
-            {
-              "*": {
-                "pre_format": {
-                  "format": "%.2f",           // printf-style format
-                  "bool_true_value": "Yes",
-                  "bool_false_value": "No"
-                },
-                "markdown_pattern": "**{{{_value}}}**",  // Handlebars pattern
-                "template_engine": "handlebars",
-                "column_order": false         // disable sorting
-              },
-              "compact": {...},
-              "detailed": {...}
-            }
+        See ANNOTATION TOOL GUIDE for column-display schema and context
+        names. Replaces the entire annotation. Pass null to remove.
+        For display name only, use set_column_display_name.
 
         Args:
-            hostname: Hostname of the DERIVA server.
+            hostname: DERIVA server hostname.
             catalog_id: Catalog ID or alias.
             schema: Schema name.
             table: Table name.
@@ -1260,40 +1187,21 @@ def register(ctx: PluginContext) -> None:
     ) -> str:
         """Apply Chaise web interface annotations at the catalog level.
 
-        Sets the chaise-config and display annotations on the catalog object,
-        controlling how the Chaise data browser presents the catalog: navbar
-        brand text, browser tab title, default landing table, system column
-        visibility, and an optional navigation bar menu.
+        See ANNOTATION TOOL GUIDE for full annotation patterns.
 
-        Standard settings applied on every call:
-            - display: underline_space -- underscores in names rendered as spaces
-            - deleteRecord: true
-            - showFaceting: true
-            - shareCiteAcls: true
-            - exportConfigsSubmenu: accessible to all users (show and enable = ["*"])
-
-        Navbar menu options (mutually exclusive; navbar_menu takes precedence):
-            - navbar_menu: supply a complete navbarMenu dict (passed through as-is)
-            - auto_schema_menu: True generates a simple menu from the live schema --
-              one submenu per non-public schema with all tables listed alphabetically.
-              Useful for quick generic catalog setup without a hand-crafted menu.
+        Sets chaise-config and display annotations controlling navbar brand,
+        tab title, default table, and system column visibility. Also applies
+        standard settings (underline_space, deleteRecord, showFaceting, etc.).
 
         Args:
-            hostname: Hostname of the DERIVA server.
+            hostname: DERIVA server hostname.
             catalog_id: Catalog ID or alias.
-            navbar_brand_text: Text shown in the Chaise navbar brand area.
+            navbar_brand_text: Navbar brand text.
             head_title: Browser tab title.
-            default_table: Optional dict with "schema" and "table" keys identifying
-                the table Chaise opens by default, e.g. {"schema": "isa", "table": "Dataset"}.
-                If omitted, Chaise uses its own built-in default.
-            navbar_menu: Full custom navbarMenu dict, e.g.:
-                {"newTab": false, "children": [{"name": "Data", "children": [...]}]}
-                If provided, auto_schema_menu is ignored.
-            auto_schema_menu: If True and navbar_menu is None, builds a simple navbar
-                menu from the live catalog schema. Excludes the "public" system schema.
-            show_system_columns: If True (default), adds RID to
-                systemColumnsDisplayEntry and systemColumnsDisplayCompact so the
-                RID column is visible in record and compact views.
+            default_table: Default landing table {"schema": ..., "table": ...}.
+            navbar_menu: Full custom navbarMenu dict (overrides auto_schema_menu).
+            auto_schema_menu: If True, auto-generate menu from live schema.
+            show_system_columns: Show RID in record/compact views (default True).
         """
         try:
             with deriva_call():

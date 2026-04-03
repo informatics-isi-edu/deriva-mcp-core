@@ -1956,7 +1956,7 @@ re-crawling at runtime.
 
 ### 7.4 Built-in Prompts and Resources
 
-**Status:** Design only.
+**Status:** Prompts DONE (2026-04-03). Resources still design only.
 
 #### Motivation
 
@@ -1970,9 +1970,9 @@ MCP prompts and resources provide a different interaction surface from tools:
   than raw capability.
 
 `PluginContext` already exposes `ctx.resource()` and `ctx.prompt()` pass-through
-decorators. Core registers none of its own yet.
+decorators.
 
-#### Built-in resources (`tools/resources.py`, new file)
+#### Built-in resources (`tools/resources.py`, new file) -- NOT YET IMPLEMENTED
 
 | URI                                                               | Content                                                 | Notes                                    |
 |-------------------------------------------------------------------|---------------------------------------------------------|------------------------------------------|
@@ -1984,21 +1984,64 @@ decorators. Core registers none of its own yet.
 Resources use the same `get_catalog()` + credential flow as tools. Schema
 resources are naturally cached by the RAG subsystem if RAG is enabled.
 
-#### Built-in prompts (`tools/prompts.py`, new file)
+#### Built-in prompts (`tools/prompts.py`) [DONE -- 2026-04-03]
 
-| Name              | Description                                                                                |
-|-------------------|--------------------------------------------------------------------------------------------|
-| `explore-catalog` | Step-by-step guide: list schemas, list tables, inspect a table, run a sample query         |
-| `query-catalog`   | Guide to building ERMrest queries: entity path, attribute projection, filters, sort, limit |
-| `annotate-table`  | Guide to setting display annotations (visible columns, display names) via annotation tools |
+Four guide prompts registered via `ctx.prompt()`, each covering a tool group.
+Prompts are static text (plain ASCII) returned as a single user message --
+no tool calls or catalog access required to render.
 
-Prompts return a list of `PromptMessage` objects (user + assistant turns) as
-expected by the MCP SDK. They do not require tool calls to render -- they are
-static workflow text.
+| Name               | Description                                                                          |
+|--------------------|--------------------------------------------------------------------------------------|
+| `query_guide`      | ERMrest query patterns: path syntax, filter operators, joins, pagination, aggregates |
+| `entity_guide`     | Entity CRUD: preflight count, pagination, multi-table query guardrails               |
+| `annotation_guide` | Chaise annotation patterns: context names, column/FK directives, Handlebars          |
+| `catalog_guide`    | Catalog management: snaptime format, cloning, aliases, history bounds                |
 
-Both `tools/resources.py` and `tools/prompts.py` are registered via
+The original plan had three prompts (`explore-catalog`, `query-catalog`,
+`annotate-table`) oriented as step-by-step workflow guides. The implementation
+instead uses four reference-style guides organized by tool group, because
+testing with the mcp-ui chatbot revealed that the LLM needs dense behavioral
+directives rather than workflow narratives. Key sections that emerged from
+iterative testing:
+
+- **"USE THE SCHEMA CONTEXT (MANDATORY)"** -- prevents redundant get_schema
+  calls when the client has already injected the schema into the system prompt.
+- **"STOP -- USE THE RIGHT TOOL FOR MULTI-TABLE QUERIES"** -- prevents N+1
+  get_entities anti-pattern; directs LLM to use query_attribute with join paths.
+- **"EMPTY RESULTS ARE VALID (MANDATORY)"** -- prevents the LLM from refusing
+  to accept 0 rows and making 5-10 "investigative" follow-up calls.
+- **"DISPLAY RULES (MANDATORY)"** -- prevents column hiding and value truncation.
+- **"PREFLIGHT COUNT RULE (MANDATORY)"** -- gates large fetches behind a count
+  check so the LLM does not accidentally retrieve thousands of rows.
+
+Prompt content uses illustrative schema names (`MySchema:`) instead of
+catalog-specific names (e.g., `isa:`) to prevent the LLM from copying example
+schema names literally into queries.
+
+#### Docstring trimming [DONE -- 2026-04-03]
+
+Tool docstrings in `entity.py`, `query.py`, `catalog.py`, and `annotation.py`
+were trimmed to remove behavioral guidance that is now in the guide prompts.
+Each docstring references the relevant guide with "See ENTITY TOOL GUIDE" or
+similar. This reduces per-tool-call token cost (the tool list is included in
+every Anthropic API call) while keeping the guidance available via the prompts.
+
+#### Server instructions [DONE -- 2026-04-03]
+
+Added `instructions=` to all three `FastMCP()` constructor calls (anonymous
+HTTP, authenticated HTTP, stdio) so MCP clients receive tool-group guidance at
+init time via the MCP protocol `instructions` field.
+
+#### Log noise reduction [DONE -- 2026-04-03]
+
+- Demoted verifier "Authenticated: principal=..." from INFO to DEBUG (already
+  recorded in the audit log).
+- Suppressed `mcp.server.streamable_http` "Terminating session: None" at
+  WARNING level (noise from stateless-http mode on every request).
+
+Both `tools/prompts.py` and the server changes are registered via
 `register(ctx)` functions called from `server.py` alongside the existing tool
-modules.
+modules. 6 tests in `TestPrompts` class in `test_tools.py`.
 
 ---
 

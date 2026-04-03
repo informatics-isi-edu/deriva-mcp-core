@@ -170,64 +170,27 @@ def register(ctx: PluginContext) -> None:
     ) -> str:
         """Retrieve entities from a DERIVA table.
 
-        Returns up to `limit` rows sorted by RID. Use `filters` for simple
-        column-equality filtering. Use `after_rid` for cursor-based pagination.
+        See ENTITY TOOL GUIDE for preflight rules, pagination, and display
+        rules.
 
-        IMPORTANT -- PREFLIGHT COUNT RULE: When the row count of the target
-        table is not already known from a prior count_table or get_entities
-        preflight call in this session, you MUST call get_entities with
-        preflight_count=True before fetching any rows. This is mandatory
-        whenever the user asks to retrieve "all" records, an unfiltered table,
-        or any table whose size has not been established.
+        Returns up to `limit` rows sorted by RID with optional equality filters
+        and cursor-based pagination via `after_rid`.
 
-        When preflight_count=True the tool ONLY returns the row count -- it
-        never fetches entities regardless of the limit parameter. Present the
-        count to the user and ask whether to proceed and with what limit before
-        calling get_entities again with preflight_count=False (the default) to
-        actually retrieve rows. Do NOT pass a large limit on the preflight call;
-        it is ignored for fetching purposes.
-
-        The preflight flag is False by default so repeat calls (where the count
-        is already known) do not pay the extra round-trip.
-
-        Cursor-based pagination:
-            Rows are always returned sorted by RID. To retrieve subsequent pages,
-            set after_rid to the RID of the last row from the previous page.
-            Stop when count < limit.
-
-                Page 1: get_entities(schema, table, limit=50)
-                Page 2: get_entities(schema, table, limit=50, after_rid="LAST_RID")
-                Page 3: get_entities(schema, table, limit=50, after_rid="LAST_RID")
-
-        For other access patterns use the appropriate tool:
-            - Column projection (select specific columns): query_attribute
-            - Path traversal across joined tables: query_attribute
-            - Aggregate functions (count, avg, max): query_aggregate
-            - Row count with optional filters: count_table
-            - Single record by RID: use filters={"RID": rid}
+        PREFLIGHT COUNT RULE: When the table's row count is unknown, you MUST
+        call with preflight_count=True first. It returns only the count (never
+        fetches rows). Present the count, confirm the limit, then call again
+        with preflight_count=False.
 
         Args:
-            hostname: Hostname of the DERIVA server.
-            catalog_id: Catalog ID, alias, or compound ID@snaptime for historical
-                snapshot access (e.g. "1@2TA-YA2D-ZDWY"). The snaptime must be a
-                Crockford base32 string -- never a plain date. Call resolve_snaptime
-                first to convert a human-readable date to a snaptime.
-            schema: Schema name (e.g. "public" or "isa").
+            hostname: DERIVA server hostname.
+            catalog_id: Catalog ID, alias, or ID@snaptime (Crockford base32 --
+                call resolve_snaptime to convert a date).
+            schema: Schema name.
             table: Table name.
-            filters: Optional column equality filters {column: value}.
-            limit: Maximum entities to return (default 100, max 1000).
-            after_rid: When set, returns rows whose RID sorts after this value.
-                Set to the RID of the last row from the previous page to advance
-                the cursor. Omit on the first page.
-            preflight_count: If True, return only the row count without fetching
-                entities. Present the count to the user, confirm the limit, then
-                call again with preflight_count=False to actually retrieve rows.
-                Default False.
-
-        Display rules: always show RID. Omit ERMrest system columns RCT, RMT,
-        RCB, RMB unless the user explicitly asks for them. Show ALL remaining
-        columns in results, including those whose values are entirely null --
-        never hide a column because its values are null.
+            filters: Optional equality filters {column: value}.
+            limit: Max entities to return (default 100, max 1000).
+            after_rid: RID of last row from previous page to advance cursor.
+            preflight_count: If True, return count only. Default False.
         """
         try:
             effective_limit = min(limit, 1000)
@@ -289,11 +252,13 @@ def register(ctx: PluginContext) -> None:
     ) -> str:
         """Insert new entity records into a DERIVA table.
 
-        Sends a POST request with the given entity list. ERMrest assigns RID
-        and system columns (RCT, RCB, RMT, RMB) automatically.
+        See ENTITY TOOL GUIDE for entity operation patterns.
+
+        Omit RID and system columns (RCT, RCB, RMT, RMB) -- ERMrest
+        generates them automatically.
 
         Args:
-            hostname: Hostname of the DERIVA server.
+            hostname: DERIVA server hostname.
             catalog_id: Catalog ID or alias.
             schema: Schema name.
             table: Table name.
@@ -343,18 +308,17 @@ def register(ctx: PluginContext) -> None:
     ) -> str:
         """Update existing entity records in a DERIVA table.
 
-        Uses PUT /attributegroup (via the deriva-py datapath API) so only the
-        columns explicitly included in each entity dict are updated. Columns
-        not present in the input are left unchanged -- nullable columns are
-        NOT nulled out. Each entity dict must include RID to identify the row.
+        See ENTITY TOOL GUIDE for entity operation patterns.
+
+        Uses sparse updates (PUT /attributegroup) -- only columns present in
+        each dict are modified. Each entity dict must include RID.
 
         Args:
-            hostname: Hostname of the DERIVA server.
+            hostname: DERIVA server hostname.
             catalog_id: Catalog ID or alias.
             schema: Schema name.
             table: Table name.
-            entities: List of entity dicts. Each must include RID plus any
-                columns to update. Omit columns that should remain unchanged.
+            entities: List of entity dicts with RID plus columns to update.
         """
         try:
             with deriva_call():
@@ -400,11 +364,13 @@ def register(ctx: PluginContext) -> None:
     ) -> str:
         """Delete entity records matching the given filters.
 
-        Filters are required to prevent accidental full-table deletion.
-        For fine-grained control, use RID as the filter key.
+        See ENTITY TOOL GUIDE for entity operation patterns.
+
+        Filters are required (non-empty) to prevent accidental full-table
+        deletion. Use filters={"RID": rid} for single-row deletes.
 
         Args:
-            hostname: Hostname of the DERIVA server.
+            hostname: DERIVA server hostname.
             catalog_id: Catalog ID or alias.
             schema: Schema name.
             table: Table name.
