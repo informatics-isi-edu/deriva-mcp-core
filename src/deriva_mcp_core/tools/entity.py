@@ -24,6 +24,7 @@ from urllib.parse import quote
 
 from . import fmt_exc
 from ..context import deriva_call, get_catalog
+from ..rag import get_rag_store
 from ..telemetry import audit_event
 
 if TYPE_CHECKING:
@@ -68,8 +69,6 @@ async def _rag_suggestions(
     Returns an empty list when the RAG subsystem is disabled or the store
     has no schema chunks indexed yet for this catalog.
     """
-    from ..rag import get_rag_store
-
     store = get_rag_store()
     if store is None:
         logger.debug("_rag_suggestions: RAG store not initialized, skipping suggestions")
@@ -394,9 +393,7 @@ def register(ctx: PluginContext) -> None:
             filters: Column equality filters {column: value}. Must be non-empty.
         """
         if not filters:
-            return json.dumps(
-                {"error": "filters must be non-empty to prevent full-table deletion"}
-            )
+            return json.dumps({"error": "filters must be non-empty to prevent full-table deletion"})
         try:
             with deriva_call():
                 catalog = get_catalog(hostname, catalog_id)

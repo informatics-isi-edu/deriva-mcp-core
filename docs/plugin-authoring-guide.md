@@ -412,13 +412,13 @@ is disabled, so plugins need no RAG guard logic.
 
 ### Declaring a Documentation Source
 
-Register a GitHub documentation source with `ctx.rag_source()`. The server crawls
+Register a GitHub documentation source with `ctx.rag_github_source()`. The server crawls
 it incrementally on startup (`DERIVA_MCP_RAG_AUTO_UPDATE=true`) and indexes any
 changed Markdown files:
 
 ```python
 def register(ctx: PluginContext) -> None:
-    ctx.rag_source(
+    ctx.rag_github_source(
         name="my-plugin-docs",  # unique name; must not conflict with built-ins
         repo_owner="my-org",
         repo_name="my-plugin",
@@ -432,7 +432,7 @@ Plugin-declared sources take precedence over runtime-added sources
 (`rag_add_source` tool) on name conflict. Built-in source names (`deriva-py-docs`,
 `ermrest-docs`, `chaise-docs`) are reserved.
 
-Sources declared via `ctx.rag_source()` cannot be removed with `rag_remove_source`
+Sources declared via `ctx.rag_github_source()` cannot be removed with `rag_remove_source`
 -- that tool only manages runtime-added sources.
 
 ### Indexing Catalog Data

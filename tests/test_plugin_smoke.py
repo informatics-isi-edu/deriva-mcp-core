@@ -31,7 +31,7 @@ import pytest
 from deriva_mcp_core.context import set_current_credential
 from deriva_mcp_core.plugin.api import (
     PluginContext,
-    RagSourceDeclaration,
+    RagGitHubSourceDeclaration,
     _set_plugin_context,
     fire_catalog_connect,
 )
@@ -103,7 +103,7 @@ def mock_catalog():
 # ---------------------------------------------------------------------------
 # Reference plugin implementation
 # ---------------------------------------------------------------------------
-# _RAG_SOURCE_KWARGS holds the arguments that a plugin would pass to ctx.rag_source().
+# _RAG_SOURCE_KWARGS holds the arguments that a plugin would pass to ctx.rag_github_source().
 # Defined once here so both the unified and split implementations stay in sync.
 
 _RAG_SOURCE_KWARGS: dict[str, str] = dict(
@@ -157,7 +157,7 @@ def _register_unified(ctx: PluginContext, index_fn=None) -> None:
     ctx.on_catalog_connect(_on_connect)
 
     # RAG component: documentation source declaration.
-    ctx.rag_source(**_RAG_SOURCE_KWARGS)
+    ctx.rag_github_source(**_RAG_SOURCE_KWARGS)
 
 
 def _register_tools_only(ctx: PluginContext) -> None:
@@ -197,7 +197,7 @@ def _register_rag_only(ctx: PluginContext, index_fn=None) -> None:
             index_fn(hostname, catalog_id)
 
     ctx.on_catalog_connect(_on_connect)
-    ctx.rag_source(**_RAG_SOURCE_KWARGS)
+    ctx.rag_github_source(**_RAG_SOURCE_KWARGS)
 
 
 # ---------------------------------------------------------------------------
@@ -211,11 +211,11 @@ def test_unified_registers_both_tools(ctx):
     assert "plugin_set_description" in ctx._mcp.tools
 
 
-def test_unified_registers_rag_source(ctx):
+def test_unified_registers_rag_github_source(ctx):
     _register_unified(ctx)
     assert len(ctx._rag_sources) == 1
     src = ctx._rag_sources[0]
-    assert isinstance(src, RagSourceDeclaration)
+    assert isinstance(src, RagGitHubSourceDeclaration)
     assert src.name == "my-plugin-docs"
     assert src.repo_owner == "my-org"
     assert src.doc_type == "user-guide"

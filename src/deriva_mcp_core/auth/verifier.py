@@ -137,15 +137,8 @@ class CredenzaTokenVerifier:
         else:
             set_mutation_allowed(True)
 
-        display = (
-            result.payload.get("email") or result.payload.get("preferred_username") or result.sub
-        )
-        logger.debug(
-            "Authenticated: principal=%s display=%s aud=%s",
-            principal,
-            display,
-            result.aud,
-        )
+        display = result.payload.get("email") or result.payload.get("preferred_username") or result.sub
+        logger.debug("Authenticated: principal=%s display=%s aud=%s", principal, display, result.aud)
         audit_event("token_verified", display=display)
 
         return AccessToken(

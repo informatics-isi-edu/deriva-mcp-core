@@ -112,6 +112,18 @@ def _fk_summary(fk: dict) -> dict[str, Any]:
     }
 
 
+# In-process schema cache keyed by (normalized_hostname, catalog_id).
+# Populated on every _fetch_schema() call. Stale after schema mutations but
+# refreshed the next time any catalog tool touches the same (hostname, catalog_id).
+# Used by the deriva:// resources to serve schema data without an extra round trip.
+_schema_cache: dict[tuple[str, str], dict] = {}
+
+
+def get_cached_schema(hostname: str, catalog_id: str) -> dict | None:
+    """Return the cached schema JSON for (hostname, catalog_id), or None if cold."""
+    return _schema_cache.get((_remap(hostname), catalog_id))
+
+
 def _fetch_schema(hostname: str, catalog_id: str, user_id: str) -> dict:
     """Fetch full schema JSON using the current credential, compute hash, fire hooks.
 
@@ -128,6 +140,7 @@ def _fetch_schema(hostname: str, catalog_id: str, user_id: str) -> dict:
         # Note: deriva-py catalog.get() is a synchronous requests call.
         schema_json = catalog.get("/schema").json()
     schema_hash = _compute_schema_hash(schema_json)
+    _schema_cache[(_remap(hostname), catalog_id)] = schema_json
     fire_catalog_connect(hostname, catalog_id, schema_hash, schema_json)
     return schema_json
 

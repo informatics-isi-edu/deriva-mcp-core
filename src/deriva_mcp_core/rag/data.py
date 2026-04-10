@@ -29,6 +29,9 @@ if TYPE_CHECKING:
 # System columns excluded from generic row rendering
 _SYSTEM_COLS: frozenset[str] = frozenset({"RID", "RCT", "RMT", "RCB", "RMB"})
 
+# Rows processed per store.add() call. Bounds peak memory for large tables.
+_DATA_BATCH_SIZE = 50
+
 
 class RowSerializer:
     """Protocol for custom table-row-to-Markdown serialization.
@@ -122,34 +125,25 @@ async def index_table_data(
             except Exception:
                 pass  # malformed timestamp -- proceed with reindex
 
-    docs: list[str] = []
-    for row in rows:
-        if serializer is not None:
-            rendered = serializer.serialize(table_name, row)
-        else:
-            rendered = None
-        if rendered is None:
-            rendered = _generic_row_markdown(table_name, row)
-        docs.append(rendered)
-
-    chunks: list[Chunk] = []
-    for doc in docs:
-        row_chunks = chunk_markdown(
-            doc,
-            source=source,
-            doc_type="data",
-        )
-        for c in row_chunks:
-            chunks.append(
-                Chunk(
+    # Delete stale data once, then add chunks in batches to bound peak memory.
+    await store.delete_source(source)
+    chunk_offset = 0
+    for batch_start in range(0, len(rows), _DATA_BATCH_SIZE):
+        batch = rows[batch_start:batch_start + _DATA_BATCH_SIZE]
+        batch_chunks: list[Chunk] = []
+        for row in batch:
+            rendered = serializer.serialize(table_name, row) if serializer is not None else None
+            if rendered is None:
+                rendered = _generic_row_markdown(table_name, row)
+            for c in chunk_markdown(rendered, source=source, doc_type="data"):
+                batch_chunks.append(Chunk(
                     text=c.text,
                     source=source,
                     doc_type="data",
                     section_heading=c.section_heading,
                     heading_hierarchy=c.heading_hierarchy,
-                    chunk_index=len(chunks),
-                )
-            )
-
-    if chunks:
-        await store.upsert(chunks)
+                    chunk_index=chunk_offset + len(batch_chunks),
+                ))
+        if batch_chunks:
+            await store.add(batch_chunks)
+            chunk_offset += len(batch_chunks)

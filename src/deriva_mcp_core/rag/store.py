@@ -18,6 +18,7 @@ by passing it to PluginContext (see plugin authoring guide).
 import asyncio
 import json
 import logging
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -41,6 +42,8 @@ class Chunk:
     section_heading: str = ""
     heading_hierarchy: list[str] = field(default_factory=list)
     chunk_index: int = 0
+    url: str = ""  # optional record URL (e.g. Chaise link) for this chunk
+    title: str = ""  # optional human-readable title for this chunk's record
 
 
 @dataclass
@@ -83,6 +86,8 @@ def _chunk_metadata(chunk: Chunk, indexed_at: str) -> dict[str, Any]:
         "heading_hierarchy": json.dumps(chunk.heading_hierarchy),
         "chunk_index": chunk.chunk_index,
         "indexed_at": indexed_at,
+        "url": chunk.url,
+        "title": chunk.title,
     }
 
 
@@ -117,6 +122,14 @@ class VectorStore:
         """Replace all existing chunks for each source present in chunks,
         then insert the new chunks. Chunks for the same source are replaced
         atomically (delete-then-add)."""
+        raise NotImplementedError
+
+    async def add(self, chunks: list[Chunk]) -> None:
+        """Append chunks without deleting existing data for the source.
+
+        Use this when the caller manages deletion separately (e.g. delete_source
+        once upfront, then add in batches). Unlike upsert, no delete is performed.
+        """
         raise NotImplementedError
 
     async def search(
@@ -155,46 +168,88 @@ class ChromaVectorStore(VectorStore):
         self._settings = settings
         self._client: Any = None
         self._collection: Any = None
+        self._init_lock = threading.Lock()
 
     def _ensure_client(self) -> Any:
+        # IMPORTANT: self._client is assigned LAST (after self._collection) so
+        # that the guard below is only True when initialization is fully complete.
+        # Assigning _client earlier would allow a concurrent thread to slip through
+        # the guard and return self._collection while it is still None.
         if self._client is not None:
             return self._collection
-        import chromadb
-
-        if self._settings.chroma_url:  # pragma: no cover
-            from urllib.parse import urlparse
-
-            parsed = urlparse(self._settings.chroma_url)
-            self._client = chromadb.HttpClient(
-                host=parsed.hostname or "localhost",
-                port=parsed.port or 8000,
-            )
-        else:
+        with self._init_lock:
+            # Double-checked locking: re-test after acquiring to avoid a race
+            # where multiple asyncio.to_thread workers all see _client=None
+            # simultaneously and each try to create the client + download the EF.
+            if self._client is not None:
+                return self._collection
             import os
 
-            path = os.path.expanduser(self._settings.chroma_dir)
-            try:
-                self._client = chromadb.PersistentClient(path=path)
-            except (ValueError, AttributeError):
-                # Storage format incompatible with current ChromaDB version
-                # (e.g. RustBindingsAPI migration). Wipe and recreate --
-                # RAG data is re-crawlable so this is safe.
-                import shutil
+            import chromadb
 
-                logger.warning(
-                    "ChromaDB storage at %s is corrupt or incompatible; "
-                    "removing and reinitializing",
-                    path,
+            if self._settings.chroma_url:  # pragma: no cover
+                from urllib.parse import urlparse
+
+                parsed = urlparse(self._settings.chroma_url)
+                _client = chromadb.HttpClient(
+                    host=parsed.hostname or "localhost",
+                    port=parsed.port or 8000,
                 )
-                shutil.rmtree(path, ignore_errors=True)
-                os.makedirs(path, exist_ok=True)
-                self._client = chromadb.PersistentClient(path=path)
+            else:
+                path = os.path.expanduser(self._settings.chroma_dir)
+                try:
+                    _client = chromadb.PersistentClient(path=path)
+                except (ValueError, AttributeError, KeyError):
+                    # Storage format incompatible with current ChromaDB version
+                    # (e.g. RustBindingsAPI migration). Wipe and recreate --
+                    # RAG data is re-crawlable so this is safe.
+                    import shutil
 
-        self._collection = self._client.get_or_create_collection(
-            name=self._COLLECTION,
-            metadata={"hnsw:space": "cosine"},
-        )
-        return self._collection
+                    logger.warning(
+                        "ChromaDB storage at %s is corrupt or incompatible; "
+                        "removing and reinitializing",
+                        path,
+                    )
+                    shutil.rmtree(path, ignore_errors=True)
+                    os.makedirs(path, exist_ok=True)
+                    # Clear ChromaDB's in-process SharedSystemClient cache so
+                    # the retry does not hit a stale entry for this path.
+                    try:
+                        from chromadb.api.shared_system_client import SharedSystemClient
+                        SharedSystemClient._identifier_to_system.pop(path, None)
+                    except Exception:
+                        pass
+                    _client = chromadb.PersistentClient(path=path)
+
+            # Build an EF with a custom download path so the ONNX model lands
+            # on the persistent volume instead of the container-ephemeral ~/.cache.
+            # DOWNLOAD_PATH is a class attribute; overriding on the instance takes
+            # precedence in _download_model_if_not_exists (uses self.DOWNLOAD_PATH).
+            from pathlib import Path
+
+            from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
+
+            ef = ONNXMiniLM_L6_V2()
+            ef.DOWNLOAD_PATH = (  # type: ignore[attr-defined]
+                Path(os.path.expanduser(self._settings.chroma_cache_dir))
+                / "onnx_models"
+                / ef.MODEL_NAME
+            )
+
+            # Assign collection first, then client.  The outer guard checks
+            # self._client, so once _client is set the fast path returns
+            # self._collection -- which must already be fully initialized.
+            self._collection = _client.get_or_create_collection(
+                name=self._COLLECTION,
+                metadata={"hnsw:space": "cosine"},
+                embedding_function=ef,
+            )
+            # Pre-warm: download the model now, under the lock, so that
+            # concurrent workers blocked here find it already cached on disk
+            # when they are eventually released.
+            ef._download_model_if_not_exists()
+            self._client = _client  # set last -- signals initialization complete
+            return self._collection
 
     async def upsert(self, chunks: list[Chunk]) -> None:
         if not chunks:
@@ -218,6 +273,19 @@ class ChromaVectorStore(VectorStore):
                 col.add(ids=i, documents=d, metadatas=m)
 
             await asyncio.to_thread(_do_upsert, collection, source, ids, documents, metadatas)
+
+    async def add(self, chunks: list[Chunk]) -> None:
+        if not chunks:
+            return
+        collection = await asyncio.to_thread(self._ensure_client)
+        indexed_at = _now_iso()
+        sources = {c.source for c in chunks}
+        for source in sources:
+            source_chunks = [c for c in chunks if c.source == source]
+            ids = [_chunk_id(c) for c in source_chunks]
+            documents = [c.text for c in source_chunks]
+            metadatas = [_chunk_metadata(c, indexed_at) for c in source_chunks]
+            await asyncio.to_thread(collection.add, ids=ids, documents=documents, metadatas=metadatas)
 
     async def search(
         self,
@@ -370,6 +438,43 @@ class PgVectorStore(VectorStore):  # pragma: no cover
                     INSERT INTO deriva_rag_chunks
                         (id, source, doc_type, text, metadata, embedding, indexed_at)
                     VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    """,
+                    [
+                        (
+                            _chunk_id(c),
+                            c.source,
+                            c.doc_type,
+                            c.text,
+                            json.dumps(_chunk_metadata(c, indexed_at)),
+                            list(map(float, embeddings[i])),
+                            indexed_at,
+                        )
+                        for i, c in enumerate(source_chunks)
+                    ],
+                )
+
+    async def add(self, chunks: list[Chunk]) -> None:
+        if not chunks:
+            return
+        pool = await self._ensure_pool()
+        ef = self._get_ef()
+        indexed_at = _now_iso()
+        sources = {c.source for c in chunks}
+        for source in sources:
+            source_chunks = [c for c in chunks if c.source == source]
+            texts = [c.text for c in source_chunks]
+            embeddings = await asyncio.to_thread(ef, texts)
+            async with pool.acquire() as conn:
+                await conn.executemany(
+                    """
+                    INSERT INTO deriva_rag_chunks
+                        (id, source, doc_type, text, metadata, embedding, indexed_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    ON CONFLICT (id) DO UPDATE SET
+                        text = EXCLUDED.text,
+                        metadata = EXCLUDED.metadata,
+                        embedding = EXCLUDED.embedding,
+                        indexed_at = EXCLUDED.indexed_at
                     """,
                     [
                         (

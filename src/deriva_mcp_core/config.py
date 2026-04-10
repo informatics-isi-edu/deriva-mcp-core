@@ -137,6 +137,14 @@ class Settings(BaseSettings):
     # Set as a comma-separated string: DERIVA_MCP_PLUGIN_ALLOWLIST=deriva-ml,my-plugin
     plugin_allowlist: list[str] | None = None
 
+    @field_validator("plugin_allowlist", mode="before")
+    @classmethod
+    def _parse_plugin_allowlist(cls, v: object) -> object:
+        """Accept a comma-separated string in addition to a JSON list."""
+        if isinstance(v, str):
+            return [item.strip() for item in v.split(",") if item.strip()]
+        return v
+
     # Mutation claim requirement. If set, authenticated users must have a matching
     # claim in their token introspection payload to execute mutating tools (when
     # the killswitch is off). Specified as a JSON object where the key is the

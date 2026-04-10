@@ -451,7 +451,7 @@ after corruption). **DONE (Phase 5.6.5)** -- core exposes `rag_ingest` as an exp
 
 `rag_add_source` and `rag_remove_source` enable operators to manage documentation sources
 at runtime without redeploying. **DONE (Phase 5.6.5)** -- both tools persist changes to
-`sources.json`; the built-in `ctx.rag_source()` registration path remains for plugins
+`sources.json`; the built-in `ctx.rag_github_source()` registration path remains for plugins
 that declare sources statically at startup.
 
 ### 3.12 Resources and Prompts
@@ -567,7 +567,7 @@ server without modifying core code:
 - `ctx.resource()` / `ctx.prompt()` -- register resources and prompts
 - `ctx.on_catalog_connect(callback)` -- lifecycle hook; fires after any catalog access
 - `ctx.on_schema_change(callback)` -- lifecycle hook; fires after schema mutations
-- `ctx.rag_source(name, repo_owner, ...)` -- declare a documentation source for RAG
+- `ctx.rag_github_source(name, repo_owner, ...)` -- declare a documentation source for RAG
 - Entry point group: `deriva_mcp.plugins`
 
 The prototype has no plugin system.

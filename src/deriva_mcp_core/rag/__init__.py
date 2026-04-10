@@ -21,6 +21,6 @@ Submodules:
     tools    -- MCP tool registration (register, get_rag_store)
 """
 
-from .tools import get_rag_store, register
+from .tools import get_rag_status, get_rag_store, register
 
-__all__ = ["get_rag_store", "register"]
+__all__ = ["get_rag_status", "get_rag_store", "register"]

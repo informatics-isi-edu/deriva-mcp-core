@@ -36,19 +36,47 @@ from .plugin.loader import load_plugins
 from .rag import register as _register_rag
 from .tasks.manager import TaskManager, _set_task_manager
 from .telemetry import init_audit_logger
-from .tools import annotation, catalog, entity, hatrac, prompts, query, schema, tasks, vocabulary
+from .tools import annotation, catalog, entity, hatrac, prompts, query, resources, schema, tasks, vocabulary
 
 logger = logging.getLogger(__name__)
 
 
-def _init_logging(debug: bool = False, app_use_syslog: bool = False) -> None:  # pragma: no cover
-    """Configure the root deriva_mcp_core logger.
+def _merge_env(env_file: str | None) -> dict[str, str]:
+    """Return a merged env dict: env file values overlaid by os.environ.
 
-    Always adds a stderr StreamHandler (for ``docker logs`` and local dev).
-    Optionally adds a SysLogHandler on LOCAL1 when *app_use_syslog* is True,
+    Reads a simple KEY=VALUE env file (comments and blank lines ignored,
+    inline quotes stripped). os.environ always wins over file values so that
+    runtime overrides are respected without modifying the file.
+    """
+    merged: dict[str, str] = {}
+    if env_file:
+        try:
+            with open(env_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    merged[key.strip()] = value.strip().strip('"').strip("'")
+        except OSError:
+            logger.warning("Could not read env file: %s", env_file)
+    merged.update(os.environ)
+    return merged
+
+
+def _init_logging(debug: bool = False, app_use_syslog: bool = False) -> None:  # pragma: no cover
+    """Configure logging for deriva-mcp-core and its plugins.
+
+    Strategy: root stays at WARNING so third-party library noise (mcp internals,
+    chromadb, httpx, uvicorn request details, etc.) is suppressed regardless of
+    the debug flag. Only deriva_mcp_core and loaded plugin loggers are promoted
+    to DEBUG or INFO. Plugin loggers are set after load via set_plugin_log_level().
+
+    Always adds a stderr StreamHandler (for docker logs and local dev).
+    Optionally adds a SysLogHandler on LOCAL1 when app_use_syslog is True,
     for non-Docker deployments where syslog is the only path to a centralized
-    collector.  In Docker, ``driver: syslog`` in compose already forwards
-    stderr, so enabling this would duplicate every app log line.
+    collector.  In Docker, driver: syslog in compose already forwards stderr,
+    so enabling this would duplicate every app log line.
 
     Audit and access logs have their own SysLogHandlers (LOCAL1/LOCAL2)
     controlled by separate config flags.
@@ -57,11 +85,15 @@ def _init_logging(debug: bool = False, app_use_syslog: bool = False) -> None:  #
         "%(asctime)s [%(process)d:%(threadName)s] [%(levelname)s] [%(name)s] - %(message)s"
     )
 
-    root = logging.getLogger("deriva_mcp_core")
+    app_level = logging.DEBUG if debug else logging.INFO
 
+    # Root handler receives output from all loggers that propagate.
+    # Root level stays at WARNING so third-party libs are quiet by default.
+    root = logging.getLogger()
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(fmt_stream)
     root.addHandler(stream_handler)
+    root.setLevel(logging.WARNING)
 
     if app_use_syslog:
         syslog_socket = "/dev/log"
@@ -78,24 +110,16 @@ def _init_logging(debug: bool = False, app_use_syslog: bool = False) -> None:  #
             except Exception:
                 pass
 
-    root.setLevel(logging.DEBUG if debug else logging.INFO)
-    root.propagate = False
+    # Application logger -- propagates to root handler.
+    logging.getLogger("deriva_mcp_core").setLevel(app_level)
 
-    # Suppress per-request INFO noise from httpx/httpcore (individual fetches).
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-
-    # Suppress "Terminating session: None" noise from stateless-http mode.
-    logging.getLogger("mcp.server.streamable_http").setLevel(logging.WARNING)
-
-    # Route the mcp and uvicorn loggers through our plain stream handler so
-    # their records don't propagate to the root logger where chromadb's rich
-    # dependency may have installed a RichHandler (which produces multiline
-    # wrapped output).
+    # Give mcp and uvicorn their own handler at INFO and disable propagation so
+    # they don't double-print through root and stay quiet in debug mode.
     for lib_name in ("mcp", "uvicorn"):
         lib_log = logging.getLogger(lib_name)
         lib_log.handlers = []
         lib_log.addHandler(stream_handler)
+        lib_log.setLevel(logging.INFO)
         lib_log.propagate = False
 
     # Detach uvicorn.access from the main log stream.  Handlers are added
@@ -104,6 +128,18 @@ def _init_logging(debug: bool = False, app_use_syslog: bool = False) -> None:  #
     access_log.handlers = []
     access_log.propagate = False
     access_log.setLevel(logging.INFO)
+
+
+def _set_plugin_log_level(plugin_packages: list[str], debug: bool = False) -> None:  # pragma: no cover
+    """Set log level for each loaded plugin's top-level package logger.
+
+    Called after load_plugins() so that plugin loggers (e.g. facebase_deriva_mcp_plugin)
+    are promoted to the same DEBUG/INFO level as deriva_mcp_core rather than
+    inheriting WARNING from root.
+    """
+    level = logging.DEBUG if debug else logging.INFO
+    for pkg in plugin_packages:
+        logging.getLogger(pkg).setLevel(level)
 
 
 def _init_access_logging(cfg: Settings) -> None:  # pragma: no cover
@@ -119,9 +155,7 @@ def _init_access_logging(cfg: Settings) -> None:  # pragma: no cover
     access_log = logging.getLogger("uvicorn.access")
 
     if cfg.access_logfile_path:
-        fh = RotatingFileHandler(
-            cfg.access_logfile_path, maxBytes=50_000_000, backupCount=5
-        )
+        fh = RotatingFileHandler(cfg.access_logfile_path, maxBytes=50_000_000, backupCount=5)
         fh.setFormatter(fmt)
         access_log.addHandler(fh)
 
@@ -129,9 +163,7 @@ def _init_access_logging(cfg: Settings) -> None:  # pragma: no cover
         syslog_socket = "/dev/log"
         if os.path.exists(syslog_socket) and os.access(syslog_socket, os.W_OK):
             try:
-                sh = SysLogHandler(
-                    address=syslog_socket, facility=SysLogHandler.LOG_LOCAL2
-                )
+                sh = SysLogHandler(address=syslog_socket, facility=SysLogHandler.LOG_LOCAL2)
                 sh.ident = "deriva-mcp-access: "
                 sh.setFormatter(logging.Formatter("%(message)s"))
                 access_log.addHandler(sh)
@@ -249,16 +281,19 @@ def create_server(
         disable_mutating_tools=cfg.disable_mutating_tools,
         mutation_required_claim=cfg.mutation_required_claim,
         task_manager=task_manager,
+        env=_merge_env(env_file),
     )
     _set_plugin_context(ctx)
 
-    for module in [catalog, entity, query, hatrac, vocabulary, annotation, schema, tasks, prompts]:
+    for module in [catalog, entity, query, hatrac, vocabulary, annotation, schema, tasks, prompts, resources]:
         module.register(ctx)
 
-    _register_rag(ctx, env_file=env_file)
+    # Load plugins before RAG so plugin-declared web/data sources are visible
+    # to rag/tools.py when it builds all_sources from ctx._rag_web_sources et al.
+    loaded_pkgs = load_plugins(ctx, allowlist=cfg.plugin_allowlist)
+    _set_plugin_log_level(loaded_pkgs, debug=cfg.debug)
 
-    # Discover and register external plugins (entry points)
-    load_plugins(ctx, allowlist=cfg.plugin_allowlist)
+    _register_rag(ctx, env_file=env_file)
 
     return mcp
 

@@ -132,7 +132,7 @@ artificial indirection.
   connects to a catalog (provides `hostname`, `catalog_id`, `schema_hash`, `schema_json`)
 - `ctx.on_schema_change(callback)` -- register a lifecycle hook called after any mutating
   tool modifies a catalog's schema (provides `hostname`, `catalog_id`)
-- `ctx.rag_source(name, repo_owner, repo_name, branch, path_prefix, doc_type?)` --
+- `ctx.rag_github_source(name, repo_owner, repo_name, branch, path_prefix, doc_type?)` --
   declare a documentation source that the RAG subsystem should index; called from
   `register(ctx)` so sources are discovered automatically when the plugin is installed;
   is a no-op when `DERIVA_MCP_RAG_ENABLED=false` so plugins need no RAG guard logic
@@ -708,7 +708,7 @@ and `has_source`. The schema for the pgvector table is managed by `PgVectorStore
 
 Documentation sources are registered through two paths, merged at startup:
 
-1. **Plugin-declared** (via `ctx.rag_source()` in `register(ctx)`): sources declared by
+1. **Plugin-declared** (via `ctx.rag_github_source()` in `register(ctx)`): sources declared by
    installed plugins. Discovered automatically -- no admin action required after plugin
    installation. The deriva-ml plugin uses this to register its own docs.
 
@@ -1004,7 +1004,7 @@ the update must succeed without requiring reconnect or reauth.
 `tests/test_plugin_smoke.py` -- 11 tests covering the full plugin authoring contract:
 
 - **Unified pattern**: one `register(ctx)` declares primary tools (read + write) and RAG
-  components (documentation source via `ctx.rag_source()` + data-indexing lifecycle hook)
+  components (documentation source via `ctx.rag_github_source()` + data-indexing lifecycle hook)
 - **Split pattern**: two separate register functions on the same `PluginContext` --
   `_register_tools_only(ctx)` and `_register_rag_only(ctx)` -- produce identical state,
   validating that tools and RAG can ship from separate packages/repos
@@ -1783,9 +1783,9 @@ use it without reaching into `context` directly.
 
 ---
 
-## Planned: Phase 7 -- Generalized RAG Sources
+## Phase 7 -- Generalized RAG Sources
 
-**Status:** Design only.
+**Status:** COMPLETE (2026-04-07). 521 tests, 90% coverage.
 
 ### Motivation
 
@@ -1808,7 +1808,7 @@ Together these unblock two concrete use cases:
 
 ---
 
-### 7.1 Web Crawler Source (`rag/web_crawler.py`)
+### 7.1 Web Crawler Source (`rag/web_crawler.py`) [DONE -- 2026-04-07]
 
 A new `WebCrawler` class alongside `GitHubCrawler`. Uses `httpx` (already a
 dep) + `beautifulsoup4` (new dep, add to `rag` extra in `pyproject.toml`).
@@ -1914,7 +1914,7 @@ answers depends directly on the richness of the indexed content.
 
 ---
 
-### 7.2 Local Filesystem Source (`rag/local_source.py`)
+### 7.2 Local Filesystem Source (`rag/local_source.py`) [DONE -- 2026-04-07]
 
 Ingests `.md` and `.txt` files from a local directory tree.
 
@@ -1957,7 +1957,7 @@ method based on source type (GitHub, web, or local). The source registry in
 
 ---
 
-### 7.3 `rag_import_chunks` Tool
+### 7.3 `rag_import_chunks` Tool [DONE -- 2026-04-07]
 
 One-shot bulk import from a pre-built JSON chunk file. Designed for operators
 who run an offline crawl or ETL pipeline and produce a standard chunk export.
@@ -2015,7 +2015,7 @@ MCP prompts and resources provide a different interaction surface from tools:
 `PluginContext` already exposes `ctx.resource()` and `ctx.prompt()` pass-through
 decorators.
 
-#### Built-in resources (`tools/resources.py`, new file) -- NOT YET IMPLEMENTED
+#### Built-in resources (`tools/resources.py`) [DONE -- 2026-04-07]
 
 | URI                                                               | Content                                                 | Notes                                    |
 |-------------------------------------------------------------------|---------------------------------------------------------|------------------------------------------|
@@ -2088,9 +2088,9 @@ modules. 6 tests in `TestPrompts` class in `test_tools.py`.
 
 ---
 
-## Planned: deriva-facebase-mcp-plugin Plugin (Design Note)
+## Planned: facebase-deriva-mcp-plugin Plugin (Design Note)
 
-**Repo:** `deriva-facebase-mcp-plugin` (separate package, separate repo)
+**Repo:** `facebase-deriva-mcp-plugin` (separate package, separate repo)
 
 A site-specific plugin for the FaceBase deployment that uses the generalized RAG
 primitives from Phase 7 and adds FaceBase-specific tools, resources, and prompts.

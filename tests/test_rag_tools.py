@@ -47,6 +47,9 @@ class _MockStore:
     async def upsert(self, chunks: list[Chunk]) -> None:
         self.chunks.extend(chunks)
 
+    async def add(self, chunks: list[Chunk]) -> None:
+        self.chunks.extend(chunks)
+
     async def search(
         self, query: str, limit: int = 10, where: dict | None = None
     ) -> list[SearchResult]:
@@ -311,6 +314,70 @@ class TestRagUpdateDocs:
 
 
 # ---------------------------------------------------------------------------
+# Tests: rag_ingest (async task submission)
+# ---------------------------------------------------------------------------
+
+
+class TestRagIngest:
+    @pytest.fixture()
+    def task_ctx(self, capturing_mcp):
+        from deriva_mcp_core.tasks.manager import TaskManager
+        mgr = TaskManager()
+        _ctx = PluginContext(capturing_mcp, task_manager=mgr)
+        _set_plugin_context(_ctx)
+        yield _ctx, mgr
+        _set_plugin_context(None)
+
+    async def test_unknown_source_returns_error(self, ctx, mock_store):
+        tools, _ = _register_rag(ctx, mock_store)
+        result = json.loads(await tools["rag_ingest"]("nonexistent-source"))
+        assert "error" in result
+
+    async def test_submits_task_and_returns_task_id(self, task_ctx, mock_store):
+        import asyncio
+        _ctx, mgr = task_ctx
+        tools, docs_mgr = _register_rag(_ctx, mock_store)
+        with patch("deriva_mcp_core.context._current_user_id") as mock_uid, \
+             patch("deriva_mcp_core.context._current_bearer_token") as mock_tok:
+            mock_uid.get.return_value = "alice"
+            mock_tok.get.return_value = "tok"
+            result = json.loads(await tools["rag_ingest"]("deriva-py-docs"))
+        assert result["status"] == "submitted"
+        assert "task_id" in result
+        await asyncio.sleep(0.1)
+        record = mgr.get(result["task_id"], "alice")
+        assert record is not None
+        assert record.state == "completed"
+        assert "deriva-py-docs" in record.result["ingested"]
+
+    async def test_ingest_always_calls_force_true(self, task_ctx, mock_store):
+        import asyncio
+        _ctx, mgr = task_ctx
+        tools, docs_mgr = _register_rag(_ctx, mock_store)
+        with patch("deriva_mcp_core.context._current_user_id") as mock_uid, \
+             patch("deriva_mcp_core.context._current_bearer_token") as mock_tok:
+            mock_uid.get.return_value = "alice"
+            mock_tok.get.return_value = "tok"
+            await tools["rag_ingest"]("deriva-py-docs")
+            await asyncio.sleep(0.1)
+        docs_mgr.ingest.assert_called_once()
+        _, kwargs = docs_mgr.ingest.call_args
+        assert kwargs.get("force") is True
+
+    async def test_submit_error_returns_error(self, capturing_mcp, mock_store):
+        _ctx = PluginContext(capturing_mcp, task_manager=None)
+        _set_plugin_context(_ctx)
+        tools, _ = _register_rag(_ctx, mock_store)
+        with patch("deriva_mcp_core.context._current_user_id") as mock_uid, \
+             patch("deriva_mcp_core.context._current_bearer_token") as mock_tok:
+            mock_uid.get.return_value = "alice"
+            mock_tok.get.return_value = None
+            result = json.loads(await tools["rag_ingest"]("deriva-py-docs"))
+        assert "error" in result
+        _set_plugin_context(None)
+
+
+# ---------------------------------------------------------------------------
 # Tests: rag_status
 # ---------------------------------------------------------------------------
 
@@ -321,16 +388,36 @@ class TestRagStatus:
         result = json.loads(await tools["rag_status"]())
         assert result["enabled"] is True
         assert result["vector_backend"] == "chroma"
-        assert "sources" in result
+        assert "indexed_sources" in result
+        assert "available_to_ingest" in result
 
-    async def test_status_shows_known_sources(self, ctx, mock_store):
+    async def test_status_shows_indexed_sources(self, ctx, mock_store):
         mock_store.chunks = [
             Chunk(text="t", source="myrepo:file.md", doc_type="user-guide", chunk_index=0),
         ]
         tools, _ = _register_rag(ctx, mock_store)
         result = json.loads(await tools["rag_status"]())
-        assert "myrepo:file.md" in result["sources"]
-        assert result["sources"]["myrepo:file.md"]["chunk_count"] == 1
+        assert "myrepo:file.md" in result["indexed_sources"]
+        assert result["indexed_sources"]["myrepo:file.md"]["chunk_count"] == 1
+
+    async def test_status_lists_unindexed_registered_sources(self, ctx, mock_store):
+        # Built-in sources are registered but the mock store has no chunks for them.
+        # They must appear in available_to_ingest, not in indexed_sources.
+        tools, _ = _register_rag(ctx, mock_store)
+        result = json.loads(await tools["rag_status"]())
+        assert "deriva-py-docs" in result["available_to_ingest"]
+        assert "deriva-py-docs" not in result["indexed_sources"]
+
+    async def test_status_removes_indexed_source_from_available(self, ctx, mock_store):
+        # Indexed sources use compound keys ("source-name:path"). The source name
+        # prefix must be extracted so the source drops out of available_to_ingest.
+        mock_store.chunks = [
+            Chunk(text="t", source="deriva-py-docs:docs/README.md", doc_type="user-guide", chunk_index=0),
+            Chunk(text="t2", source="deriva-py-docs:docs/BUILD.md", doc_type="user-guide", chunk_index=0),
+        ]
+        tools, _ = _register_rag(ctx, mock_store)
+        result = json.loads(await tools["rag_status"]())
+        assert "deriva-py-docs" not in result["available_to_ingest"]
 
     async def test_status_error_returns_error_key(self, ctx, mock_store):
         async def _fail() -> dict:
@@ -429,3 +516,258 @@ class TestRagIndexTable:
                 await tools["rag_index_table"]("host.example.org", "1", "public", "Item")
             )
         assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# Tests: rag_import_chunks
+# ---------------------------------------------------------------------------
+
+
+class TestRagImportChunks:
+    async def test_import_basic_chunks(self, ctx, mock_store, tmp_path):
+        chunks = [
+            {"text": "Chunk one text here.", "source": "mysrc:file.md", "doc_type": "user-guide"},
+            {"text": "Chunk two text here.", "source": "mysrc:file.md", "doc_type": "user-guide"},
+        ]
+        chunk_file = tmp_path / "chunks.json"
+        chunk_file.write_text(json.dumps(chunks))
+
+        tools, _ = _register_rag(ctx, mock_store)
+        result = json.loads(await tools["rag_import_chunks"](str(chunk_file)))
+        assert result["status"] == "imported"
+        assert result["chunk_count"] == 2
+        assert len(mock_store.chunks) == 2
+
+    async def test_import_overrides_source_and_doc_type(self, ctx, mock_store, tmp_path):
+        chunks = [{"text": "Override me.", "source": "original", "doc_type": "old"}]
+        chunk_file = tmp_path / "chunks.json"
+        chunk_file.write_text(json.dumps(chunks))
+
+        tools, _ = _register_rag(ctx, mock_store)
+        await tools["rag_import_chunks"](
+            str(chunk_file), source_name="new-source", doc_type="new-type"
+        )
+        assert mock_store.chunks[0].source == "new-source"
+        assert mock_store.chunks[0].doc_type == "new-type"
+
+    async def test_import_replace_deletes_existing(self, ctx, mock_store, tmp_path):
+        from deriva_mcp_core.rag.store import Chunk
+        existing = Chunk(
+            text="Old chunk", source="my-source:file.md",
+            doc_type="user-guide", section_heading="", heading_hierarchy=[], chunk_index=0,
+        )
+        mock_store.chunks.append(existing)
+
+        chunks = [{"text": "New chunk.", "source": "my-source:file.md", "doc_type": "user-guide"}]
+        chunk_file = tmp_path / "chunks.json"
+        chunk_file.write_text(json.dumps(chunks))
+
+        tools, _ = _register_rag(ctx, mock_store)
+        await tools["rag_import_chunks"](
+            str(chunk_file), source_name="my-source:file.md", replace=True
+        )
+        assert len(mock_store.chunks) == 1
+        assert mock_store.chunks[0].text == "New chunk."
+
+    async def test_import_replace_requires_source_name(self, ctx, mock_store, tmp_path):
+        chunks = [{"text": "text"}]
+        chunk_file = tmp_path / "chunks.json"
+        chunk_file.write_text(json.dumps(chunks))
+
+        tools, _ = _register_rag(ctx, mock_store)
+        result = json.loads(await tools["rag_import_chunks"](str(chunk_file), replace=True))
+        assert "error" in result
+
+    async def test_import_skips_empty_text(self, ctx, mock_store, tmp_path):
+        chunks = [{"text": ""}, {"text": "Good chunk here."}]
+        chunk_file = tmp_path / "chunks.json"
+        chunk_file.write_text(json.dumps(chunks))
+
+        tools, _ = _register_rag(ctx, mock_store)
+        result = json.loads(await tools["rag_import_chunks"](str(chunk_file)))
+        assert result["chunk_count"] == 1
+
+    async def test_import_nonexistent_file(self, ctx, mock_store):
+        tools, _ = _register_rag(ctx, mock_store)
+        result = json.loads(await tools["rag_import_chunks"]("/no/such/file.json"))
+        assert "error" in result
+
+    async def test_import_non_array_file(self, ctx, mock_store, tmp_path):
+        chunk_file = tmp_path / "bad.json"
+        chunk_file.write_text(json.dumps({"not": "an array"}))
+        tools, _ = _register_rag(ctx, mock_store)
+        result = json.loads(await tools["rag_import_chunks"](str(chunk_file)))
+        assert "error" in result
+
+    def test_rag_import_chunks_registered(self, ctx, mock_store):
+        tools, _ = _register_rag(ctx, mock_store)
+        assert "rag_import_chunks" in tools
+
+
+# ---------------------------------------------------------------------------
+# Tests: _run_dataset_enricher URL generation
+# ---------------------------------------------------------------------------
+
+
+async def _fire_enricher(ctx, mock_store, mock_catalog):
+    """Register RAG, fire on_catalog_connect, wait for background tasks to run.
+
+    has_schema and index_schema run against mock_store (no real DERIVA calls).
+    get_catalog is patched to return mock_catalog so enricher URL can be captured.
+    """
+    import asyncio
+
+    _register_rag(ctx, mock_store)
+
+    with patch("deriva_mcp_core.rag.tools.get_catalog", return_value=mock_catalog):
+        from deriva_mcp_core.plugin.api import fire_catalog_connect
+        fire_catalog_connect("host.example.org", "1", "abc123", {"schemas": {}})
+        await asyncio.sleep(0.1)
+
+
+class TestDatasetEnricherUrl:
+    """Verify that _run_dataset_enricher builds correct ERMrest URLs.
+
+    The dataset fetch must use ERMrest path predicates (/col=val) not query
+    params (?col=val). Boolean filter values must be lowercase strings. The
+    ?limit= query param must be appended when indexer.limit is set.
+    """
+
+    def _make_mock_catalog(self):
+        captured: list[str] = []
+        mock_catalog = MagicMock()
+
+        def _get(url):
+            captured.append(url)
+            resp = MagicMock()
+            resp.json.return_value = []
+            return resp
+
+        mock_catalog.get.side_effect = _get
+        return mock_catalog, captured
+
+    async def test_bool_filter_uses_path_predicate_lowercase(self, ctx, mock_store):
+        """released=True filter must produce /released=true path segment, not query param."""
+        async def enricher(row, catalog):
+            return ""
+
+        ctx.rag_dataset_indexer(
+            schema="isa",
+            table="dataset",
+            enricher=enricher,
+            filter={"released": True},
+            hostname="host.example.org",
+            catalog_id="1",
+        )
+
+        mock_catalog, captured = self._make_mock_catalog()
+        await _fire_enricher(ctx, mock_store, mock_catalog)
+
+        dataset_urls = [u for u in captured if "isa:dataset" in u]
+        assert dataset_urls, "No catalog.get call with isa:dataset found"
+        url = dataset_urls[0]
+        assert "/released=true" in url, f"Expected /released=true in URL, got: {url}"
+        assert "?released" not in url, f"Unexpected query param format in URL: {url}"
+        assert "released=True" not in url, f"Python bool True (uppercase) found in URL: {url}"
+
+    async def test_limit_appended_as_query_param(self, ctx, mock_store):
+        """When limit is set, ?limit=N must appear after any path predicates."""
+        async def enricher(row, catalog):
+            return ""
+
+        ctx.rag_dataset_indexer(
+            schema="isa",
+            table="dataset",
+            enricher=enricher,
+            filter={"released": True},
+            limit=50,
+            hostname="host.example.org",
+            catalog_id="1",
+        )
+
+        mock_catalog, captured = self._make_mock_catalog()
+        await _fire_enricher(ctx, mock_store, mock_catalog)
+
+        dataset_urls = [u for u in captured if "isa:dataset" in u]
+        assert dataset_urls, "No catalog.get call with isa:dataset found"
+        url = dataset_urls[0]
+        assert "?limit=50" in url, f"Expected ?limit=50 in URL, got: {url}"
+        assert "/released=true" in url
+
+    async def test_no_limit_no_query_param(self, ctx, mock_store):
+        """When limit is None, no ?limit= query param must appear."""
+        async def enricher(row, catalog):
+            return ""
+
+        ctx.rag_dataset_indexer(
+            schema="isa",
+            table="dataset",
+            enricher=enricher,
+            filter={"released": True},
+            hostname="host.example.org",
+            catalog_id="1",
+        )
+
+        mock_catalog, captured = self._make_mock_catalog()
+        await _fire_enricher(ctx, mock_store, mock_catalog)
+
+        dataset_urls = [u for u in captured if "isa:dataset" in u]
+        assert dataset_urls, "No catalog.get call with isa:dataset found"
+        url = dataset_urls[0]
+        assert "?limit" not in url, f"Unexpected ?limit in URL: {url}"
+
+    async def test_chunk_indices_unique_across_rows(self, ctx, mock_store):
+        """Each row produces chunks starting at index 0; the enricher must renumber
+        them globally so no two chunks share the same (source, chunk_index) pair."""
+        call_count = 0
+
+        async def enricher(row, catalog):
+            nonlocal call_count
+            call_count += 1
+            # Produce text that will yield multiple chunks per row
+            return "\n\n".join(f"## Section {j}\n\n" + ("word " * 100) for j in range(3))
+
+        ctx.rag_dataset_indexer(
+            schema="isa",
+            table="dataset",
+            enricher=enricher,
+            hostname="host.example.org",
+            catalog_id="1",
+        )
+
+        # Return two rows from the catalog so the enricher runs twice
+        mock_catalog = MagicMock()
+        mock_catalog.get.side_effect = lambda url: (
+            type("R", (), {"json": lambda self: [{"RID": "1"}, {"RID": "2"}]})()
+        )
+
+        await _fire_enricher(ctx, mock_store, mock_catalog)
+
+        assert call_count == 2, "Enricher should have been called once per row"
+        ids = [f"{c.source}:{c.chunk_index}" for c in mock_store.chunks]
+        assert len(ids) == len(set(ids)), f"Duplicate chunk IDs found: {ids}"
+
+    async def test_hostname_scope_prevents_wrong_catalog(self, ctx, mock_store):
+        """Enricher scoped to facebase.org must not fire for other hostnames."""
+        async def enricher(row, catalog):
+            return ""
+
+        ctx.rag_dataset_indexer(
+            schema="isa",
+            table="dataset",
+            enricher=enricher,
+            hostname="www.facebase.org",
+            catalog_id="1",
+        )
+
+        mock_catalog, captured = self._make_mock_catalog()
+
+        _register_rag(ctx, mock_store)
+        import asyncio
+        with patch("deriva_mcp_core.rag.tools.get_catalog", return_value=mock_catalog):
+            from deriva_mcp_core.plugin.api import fire_catalog_connect
+            fire_catalog_connect("other.server.org", "1", "abc123", {"schemas": {}})
+            await asyncio.sleep(0.1)
+
+        dataset_urls = [u for u in captured if "isa:dataset" in u]
+        assert not dataset_urls, "Enricher fired for wrong hostname"

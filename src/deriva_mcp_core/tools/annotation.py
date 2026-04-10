@@ -1303,9 +1303,7 @@ def register(ctx: PluginContext) -> None:
         try:
             with deriva_call():
                 catalog = get_catalog(hostname, catalog_id)
-                rows = catalog.get(
-                    f"/entity/{schema}:{table}?limit={effective_limit}"
-                ).json()
+                rows = catalog.get(f"/entity/{schema}:{table}?limit={effective_limit}").json()
             return json.dumps({
                 "schema": schema,
                 "table": table,
