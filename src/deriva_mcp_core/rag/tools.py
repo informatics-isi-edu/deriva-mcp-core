@@ -219,9 +219,12 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
         except Exception:
             logger.warning("Schema auto-index failed for %s/%s", hostname, catalog_id, exc_info=True)
 
-        # Run dataset enrichers declared by plugins (TTL-gated per table)
-        for indexer in ctx._rag_dataset_indexers:
-            await _run_dataset_enricher(hostname, catalog_id, indexer)
+        # Run dataset enrichers declared by plugins (TTL-gated, auto_enrich opt-in only).
+        # Both the indexer flag and DERIVA_MCP_RAG_AUTO_ENRICH must be true.
+        if settings.auto_enrich:
+            for indexer in ctx._rag_dataset_indexers:
+                if indexer.auto_enrich:
+                    await _run_dataset_enricher(hostname, catalog_id, indexer)
 
     ctx.on_catalog_connect(_handle_catalog_connect)
 

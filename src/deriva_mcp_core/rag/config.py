@@ -5,6 +5,14 @@ from __future__ import annotations
 Settings are read from environment variables with the DERIVA_MCP_RAG_ prefix
 (nested under the top-level DERIVA_MCP_ namespace).
 
+Dataset enrichment:
+    DERIVA_MCP_RAG_AUTO_ENRICH=false (default)
+        When false, dataset indexers registered with auto_enrich=True are not
+        triggered automatically on catalog connect. Enrichment only runs when
+        explicitly requested via rag_ingest_datasets.
+        Set to true to enable automatic on-connect enrichment for eligible
+        indexers (those registered with auto_enrich=True).
+
 Vector backend selection:
     DERIVA_MCP_RAG_VECTOR_BACKEND=chroma (default)
         Uses embedded ChromaDB. Zero additional services.
@@ -40,6 +48,7 @@ class RAGSettings(BaseSettings):
     pg_dsn: str | None = None
 
     # General
+    auto_enrich: bool = False  # run auto_enrich=True dataset indexers on catalog connect
     auto_update: bool = True  # crawl and update docs on server startup
     auto_update_web_sources: bool = False  # include web sources in startup auto-update (default off -- web crawls compete with ERMrest load on the same host; trigger via rag_ingest instead)
     startup_ttl_hours: int = 24  # skip startup crawl for sources indexed within this many hours

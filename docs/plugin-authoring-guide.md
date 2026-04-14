@@ -437,59 +437,58 @@ Sources declared via `ctx.rag_github_source()` cannot be removed with `rag_remov
 
 ### Indexing Catalog Data
 
-Use `index_table_data()` from a `on_catalog_connect` hook to index domain-specific
-table rows for semantic search. This is the primary integration point for plugins
-that want users to search their data:
+Use `ctx.rag_dataset_indexer()` to register a dataset enrichment hook. The RAG
+subsystem calls your enricher for each row fetched from the target table and stores
+the resulting Markdown in the vector store for semantic search.
 
 ```python
-from deriva_mcp_core.rag.data import RowSerializer, data_source_name, index_table_data
-
-
 def register(ctx: PluginContext) -> None:
-    async def _on_catalog_connect(
-            hostname: str,
-            catalog_id: str,
-            schema_hash: str,
-            schema_json: dict,
-    ) -> None:
-        from deriva_mcp_core import get_catalog
-        from deriva_mcp_core.rag import get_rag_store
+    async def _enrich_dataset(row: dict, catalog) -> str:
+        title = row.get("Title", "")
+        rid = row.get("RID", "")
+        desc = row.get("Description", "")
+        return f"## Dataset: {title} (RID: {rid})\n\n{desc}"
 
-        store = get_rag_store()
-        if store is None:
-            return  # RAG disabled
-
-        # Avoid reindexing on every connect (staleness TTL defaults to 3600s)
-        user_id = _get_user_id()  # see note below
-        source = data_source_name(hostname, catalog_id, user_id)
-        if await store.has_source(source):
-            return  # already indexed and fresh
-
-        catalog = get_catalog(hostname, catalog_id)
-        rows = catalog.get("/entity/public:Dataset").json()
-        await index_table_data(
-            store=store,
-            hostname=hostname,
-            catalog_id=catalog_id,
-            table_name="Dataset",
-            rows=rows,
-            user_id=user_id,
-            serializer=MyDatasetSerializer(),
-        )
-
-    ctx.on_catalog_connect(_on_catalog_connect)
+    ctx.rag_dataset_indexer(
+        schema="isa",
+        table="dataset",
+        enricher=_enrich_dataset,
+        filter={"released": True},  # only index released datasets
+        hostname="data.example.org",  # only run against this host
+        catalog_id="1",  # only run against this catalog
+        ttl_seconds=3600,  # re-index at most once per hour
+        auto_enrich=True,  # eligible for automatic on-connect indexing
+    )
 ```
 
-Hooks run as fire-and-forget tasks. Import `get_request_user_id` inside the hook
-(not at `register()` level) so it resolves at call time from the active request
-context:
+**`auto_enrich` is opt-in at two levels:**
 
-```python
-async def _on_catalog_connect(hostname, catalog_id, schema_hash, schema_json):
-    from deriva_mcp_core.context import get_request_user_id
-    user_id = get_request_user_id()
-    ...
-```
+1. The plugin sets `auto_enrich=True` to declare the indexer as *eligible* for
+   automatic execution on catalog connect.
+2. The operator sets `DERIVA_MCP_RAG_AUTO_ENRICH=true` in the env file to actually
+   enable automatic on-connect execution.
+
+When `DERIVA_MCP_RAG_AUTO_ENRICH` is `false` (the default), dataset indexers never
+run automatically regardless of the `auto_enrich` flag. Enrichment can always be
+triggered on demand via the `rag_ingest_datasets` tool.
+
+**Key parameters:**
+
+| Parameter     | Default        | Description                                                           |
+|---------------|----------------|-----------------------------------------------------------------------|
+| `schema`      | required       | ERMrest schema name                                                   |
+| `table`       | required       | ERMrest table name                                                    |
+| `enricher`    | required       | `async (row: dict, catalog) -> str` producing Markdown for one row    |
+| `filter`      | `{}`           | Column/value filters appended as path predicates to the ERMrest query |
+| `hostname`    | `None`         | Restrict to this server hostname; `None` means all catalogs           |
+| `catalog_id`  | `None`         | Restrict to this catalog ID; `None` means all catalogs                |
+| `ttl_seconds` | no expiry      | Skip re-indexing if this source was indexed within this many seconds  |
+| `limit`       | `None`         | Append `?limit=N` to the ERMrest fetch URL                            |
+| `doc_type`    | `catalog-data` | Document type tag stored in the vector store                          |
+| `auto_enrich` | `False`        | Mark indexer as eligible for automatic on-connect execution           |
+
+The enricher receives a single row dict and the live `catalog` object. Return a
+Markdown string for that row. Returning an empty string skips the row.
 
 ### Custom Row Serialization
 

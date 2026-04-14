@@ -292,6 +292,22 @@ EXTENSION IF NOT EXISTS vector;
 | Operational overhead | Minimal               | Low                     | Moderate              |
 | Recommended for      | Dev / single instance | Shared dev / small prod | Production            |
 
+### Dataset enrichment
+
+Plugins can register dataset indexers that fetch catalog rows and index them for
+semantic search. By default, indexers never run automatically -- enrichment must be
+triggered via the `rag_ingest_datasets` tool. To allow indexers declared with
+`auto_enrich=True` to run automatically when a catalog is first accessed, set:
+
+```ini
+DERIVA_MCP_RAG_AUTO_ENRICH = true
+```
+
+This is a two-level opt-in: the plugin author marks individual indexers with
+`auto_enrich=True`, and the operator enables automatic execution globally with
+`DERIVA_MCP_RAG_AUTO_ENRICH=true`. Indexers without `auto_enrich=True` never run
+automatically, regardless of this setting.
+
 **Migration** between backends is not automated. To migrate, delete the old store
 and allow the server to re-index on next startup. Documentation sources are
 re-crawled from GitHub; catalog schema indexes are rebuilt on the next catalog

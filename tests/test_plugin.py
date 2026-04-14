@@ -488,6 +488,7 @@ def test_rag_dataset_indexer_defaults(ctx):
     assert decl.hostname is None
     assert decl.catalog_id is None
     assert decl.limit is None
+    assert decl.auto_enrich is False
 
 
 def test_rag_dataset_indexer_limit(ctx):

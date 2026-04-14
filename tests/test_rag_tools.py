@@ -88,11 +88,12 @@ def mock_store():
     return _MockStore()
 
 
-def _make_settings(enabled: bool = True, auto_update: bool = False) -> MagicMock:
+def _make_settings(enabled: bool = True, auto_update: bool = False, auto_enrich: bool = True) -> MagicMock:
     settings = MagicMock()
     settings.enabled = enabled
     settings.vector_backend = "chroma"
     settings.auto_update = auto_update
+    settings.auto_enrich = auto_enrich
     return settings
 
 
@@ -658,6 +659,7 @@ class TestDatasetEnricherUrl:
             filter={"released": True},
             hostname="host.example.org",
             catalog_id="1",
+            auto_enrich=True,
         )
 
         mock_catalog, captured = self._make_mock_catalog()
@@ -683,6 +685,7 @@ class TestDatasetEnricherUrl:
             limit=50,
             hostname="host.example.org",
             catalog_id="1",
+            auto_enrich=True,
         )
 
         mock_catalog, captured = self._make_mock_catalog()
@@ -706,6 +709,7 @@ class TestDatasetEnricherUrl:
             filter={"released": True},
             hostname="host.example.org",
             catalog_id="1",
+            auto_enrich=True,
         )
 
         mock_catalog, captured = self._make_mock_catalog()
@@ -733,6 +737,7 @@ class TestDatasetEnricherUrl:
             enricher=enricher,
             hostname="host.example.org",
             catalog_id="1",
+            auto_enrich=True,
         )
 
         # Return two rows from the catalog so the enricher runs twice
@@ -758,6 +763,7 @@ class TestDatasetEnricherUrl:
             enricher=enricher,
             hostname="www.facebase.org",
             catalog_id="1",
+            auto_enrich=True,
         )
 
         mock_catalog, captured = self._make_mock_catalog()

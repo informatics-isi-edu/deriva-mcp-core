@@ -115,6 +115,7 @@ class RagDatasetIndexerDeclaration:
     hostname: str | None  # if set, only run when connected catalog hostname matches
     catalog_id: str | None  # if set, only run when connected catalog_id matches
     limit: int | None  # if set, appended as ?limit=N to the ERMrest fetch URL
+    auto_enrich: bool = False  # if False, skip on catalog connect; trigger via rag_ingest_datasets
 
 
 _UNSET = object()
@@ -382,12 +383,9 @@ class PluginContext:
         hostname: str | None = None,
         catalog_id: str | None = None,
         limit: int | None = None,
+        auto_enrich: bool = False,
     ) -> None:
         """Register a dataset enrichment hook for the RAG subsystem.
-
-        At catalog connect time, the framework fetches filtered rows from
-        schema:table, calls enricher(row, catalog) -> str for each row, chunks
-        the result, and upserts into the vector store scoped to the catalog.
 
         The enricher is called only if the source has not been indexed within
         ttl_seconds. Staleness is checked per (hostname, catalog_id, schema, table).
@@ -409,6 +407,9 @@ class PluginContext:
                 server (e.g. a FaceBase-only indexer should not fire on other catalogs).
             catalog_id: If set, only run this enricher when the connecting
                 catalog_id matches.
+            auto_enrich: If True, run this enricher automatically on catalog
+                connect (TTL-gated). If False (default), enrichment only runs
+                when explicitly triggered via rag_ingest_datasets.
         """
         self._rag_dataset_indexers.append(
             RagDatasetIndexerDeclaration(
@@ -421,6 +422,7 @@ class PluginContext:
                 hostname=hostname,
                 catalog_id=catalog_id,
                 limit=limit,
+                auto_enrich=auto_enrich,
             )
         )
 
