@@ -606,6 +606,138 @@ class TestRagImportChunks:
 
 
 # ---------------------------------------------------------------------------
+# Tests: rag_ingest_datasets task result format
+# ---------------------------------------------------------------------------
+
+
+class TestRagIngestDatasets:
+    """Verify that rag_ingest_datasets returns structured per-source stats."""
+
+    @pytest.fixture()
+    def task_ctx(self, capturing_mcp):
+        from deriva_mcp_core.tasks.manager import TaskManager
+        mgr = TaskManager()
+        _ctx = PluginContext(capturing_mcp, task_manager=mgr)
+        _set_plugin_context(_ctx)
+        yield _ctx, mgr
+        _set_plugin_context(None)
+
+    def _make_mock_catalog(self, rows: list[dict]):
+        mock_catalog = MagicMock()
+        resp = MagicMock()
+        resp.json.return_value = rows
+        mock_catalog.get.return_value = resp
+        return mock_catalog
+
+    async def test_result_has_structured_stats(self, task_ctx, mock_store):
+        """Completed enricher run reports rows_fetched, failed, chunks -- not a bare count."""
+        import asyncio
+        _ctx, mgr = task_ctx
+
+        async def enricher(row, catalog):
+            return f"## Dataset {row['RID']}\n\nSome content about this dataset."
+
+        _ctx.rag_dataset_indexer(
+            schema="isa",
+            table="dataset",
+            enricher=enricher,
+            hostname="host.example.org",
+            catalog_id="1",
+        )
+
+        tools, _ = _register_rag(_ctx, mock_store)
+        mock_catalog = self._make_mock_catalog([{"RID": "A"}, {"RID": "B"}])
+
+        with patch("deriva_mcp_core.context._current_user_id") as mock_uid, \
+             patch("deriva_mcp_core.context._current_bearer_token") as mock_tok, \
+             patch("deriva_mcp_core.rag.tools.get_catalog", return_value=mock_catalog):
+            mock_uid.get.return_value = "alice"
+            mock_tok.get.return_value = "tok"
+            submit_result = json.loads(await tools["rag_ingest_datasets"]("host.example.org", "1"))
+            assert submit_result["status"] == "submitted"
+            task_id = submit_result["task_id"]
+            await asyncio.sleep(0.1)
+
+        record = mgr.get(task_id, "alice")
+        assert record is not None
+        assert record.state == "completed"
+
+        src = "enriched:host.example.org:1:isa:dataset"
+        per_source = record.result["enriched"][src]
+        assert per_source["rows_fetched"] == 2
+        assert per_source["failed"] == 0
+        assert per_source["chunks"] > 0
+
+    async def test_no_matching_indexer_returns_error(self, task_ctx, mock_store):
+        """When no indexer matches the catalog, return an error immediately (no task)."""
+        _ctx, _ = task_ctx
+        tools, _ = _register_rag(_ctx, mock_store)
+        result = json.loads(await tools["rag_ingest_datasets"]("other.host.org", "1"))
+        assert "error" in result
+        assert "task_id" not in result
+
+    async def test_source_name_filter_no_match_returns_error(self, task_ctx, mock_store):
+        """Explicit source_name that matches no indexer returns an error."""
+        _ctx, _ = task_ctx
+
+        async def enricher(row, catalog):
+            return "text"
+
+        _ctx.rag_dataset_indexer(
+            schema="isa",
+            table="dataset",
+            enricher=enricher,
+            hostname="host.example.org",
+            catalog_id="1",
+        )
+
+        tools, _ = _register_rag(_ctx, mock_store)
+        result = json.loads(await tools["rag_ingest_datasets"](
+            "host.example.org", "1",
+            source_name="enriched:host.example.org:1:isa:othertable",
+        ))
+        assert "error" in result
+
+    async def test_all_rows_fail_produces_zero_chunks(self, task_ctx, mock_store):
+        """When the enricher raises on every row the chunk count is 0 with failed > 0."""
+        import asyncio
+        _ctx, mgr = task_ctx
+
+        async def bad_enricher(row, catalog):
+            raise RuntimeError("enricher exploded")
+
+        _ctx.rag_dataset_indexer(
+            schema="isa",
+            table="dataset",
+            enricher=bad_enricher,
+            hostname="host.example.org",
+            catalog_id="1",
+        )
+
+        tools, _ = _register_rag(_ctx, mock_store)
+        mock_catalog = self._make_mock_catalog([{"RID": "X"}])
+
+        with patch("deriva_mcp_core.context._current_user_id") as mock_uid, \
+             patch("deriva_mcp_core.context._current_bearer_token") as mock_tok, \
+             patch("deriva_mcp_core.rag.tools.get_catalog", return_value=mock_catalog):
+            mock_uid.get.return_value = "alice"
+            mock_tok.get.return_value = "tok"
+            submit_result = json.loads(await tools["rag_ingest_datasets"]("host.example.org", "1"))
+            task_id = submit_result["task_id"]
+            await asyncio.sleep(0.1)
+
+        record = mgr.get(task_id, "alice")
+        assert record is not None
+        assert record.state == "completed"
+
+        src = "enriched:host.example.org:1:isa:dataset"
+        per_source = record.result["enriched"][src]
+        assert per_source["rows_fetched"] == 1
+        assert per_source["failed"] == 1
+        assert per_source["chunks"] == 0
+
+
+# ---------------------------------------------------------------------------
 # Tests: _run_dataset_enricher URL generation
 # ---------------------------------------------------------------------------
 

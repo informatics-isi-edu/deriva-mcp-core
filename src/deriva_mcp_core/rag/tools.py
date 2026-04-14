@@ -232,8 +232,12 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
         hostname: str,
         catalog_id: str,
         indexer: Any,
-    ) -> None:
+    ) -> dict | None:
         """Fetch rows, call the enricher, and index enriched chunks.
+
+        Returns a dict {"rows_fetched": N, "failed": N, "chunks": N} on
+        completion, or None if the run was skipped (locked, TTL fresh, or
+        fetch error).
 
         Source name: enriched:{hostname}:{catalog_id}:{schema}:{table}
         Staleness is checked per source using the indexer's ttl_seconds.
@@ -261,7 +265,7 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
         lock = _enricher_locks.setdefault(source_name, asyncio.Lock())
         if lock.locked():
             logger.info("Dataset enricher already in progress for %s, skipping", source_name)
-            return
+            return None
 
         async with lock:
             # TTL check inside the lock so the winner of a concurrent burst
@@ -281,14 +285,14 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
                             else indexer.ttl_seconds
                         )
                         if age < effective_ttl and entry.chunk_count > 0:
-                            return
+                            return None
             except Exception:
                 logger.warning(
                     "Dataset enricher TTL check failed for %s -- skipping run",
                     source_name,
                     exc_info=True,
                 )
-                return
+                return None
 
             try:
                 enc = lambda v: urllib.parse.quote(str(v), safe="")  # noqa: E731
@@ -306,7 +310,7 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
                     indexer.schema, indexer.table, hostname, catalog_id,
                     exc_info=True,
                 )
-                return
+                return None
 
             logger.info("Dataset enricher: fetched %d rows for %s", len(rows), source_name)
 
@@ -360,6 +364,7 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
                 "Dataset enricher: %s -- %d rows fetched, %d failed, %d chunks indexed",
                 source_name, len(rows), failed, total_chunks,
             )
+            return {"rows_fetched": len(rows), "failed": failed, "chunks": total_chunks}
 
     # ------------------------------------------------------------------
     # MCP tools
@@ -862,12 +867,10 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
                 except Exception:
                     pass
                 try:
-                    await _run_dataset_enricher(hostname, catalog_id, ix)
-                    stats = await store.source_stats()
-                    entry = stats.get(src)
-                    results[src] = entry.chunk_count if entry else 0
+                    run_stats = await _run_dataset_enricher(hostname, catalog_id, ix)
+                    results[src] = run_stats if run_stats is not None else {"skipped": True}
                 except Exception as exc:
-                    results[src] = f"error: {exc}"
+                    results[src] = {"error": str(exc)}
             return {"enriched": results}
 
         try:
