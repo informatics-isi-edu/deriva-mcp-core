@@ -211,6 +211,38 @@ def test_create_server_mixed_mode_creates_verifier():
     assert mcp._allow_anonymous_verifier is not None
 
 
+def test_create_server_mixed_mode_registers_prm_endpoint():
+    """Mixed mode registers the RFC 9728 protected resource metadata endpoint.
+
+    Without auth= in the FastMCP constructor the PRM endpoint is absent and
+    OAuth clients cannot discover the authorization server, falling back to
+    a path-stripped URL like https://host/authorize instead of the correct
+    https://host/authn/authorize.
+    """
+    from starlette.testclient import TestClient
+
+    mcp = create_server(transport="http", settings=_mixed_settings())
+    app = mcp.streamable_http_app()
+    client = TestClient(app, raise_server_exceptions=True)
+    # server_url has no path component, so PRM is at /.well-known/oauth-protected-resource
+    response = client.get("/.well-known/oauth-protected-resource")
+    assert response.status_code == 200
+    data = response.json()
+    assert "authorization_servers" in data
+    assert any("credenza.test.example.org" in s for s in data["authorization_servers"])
+
+
+def test_create_server_anonymous_only_no_prm_endpoint():
+    """Anonymous-only mode (no credenza_url) does not register the PRM endpoint."""
+    from starlette.testclient import TestClient
+
+    mcp = create_server(transport="http", settings=_anon_settings())
+    app = mcp.streamable_http_app()
+    client = TestClient(app, raise_server_exceptions=True)
+    response = client.get("/.well-known/oauth-protected-resource")
+    assert response.status_code == 404
+
+
 def test_create_server_normal_mode_no_anonymous_attr():
     """Normal (non-anonymous) mode does not set _allow_anonymous_verifier."""
     settings = Settings(

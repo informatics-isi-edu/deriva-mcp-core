@@ -18,10 +18,15 @@ import argparse
 import asyncio
 import logging
 import os
+from urllib.parse import urlparse
 
 from deriva.core import get_credential as _get_credential
+from mcp.server.auth.json_response import PydanticJSONResponse
+from mcp.server.auth.routes import build_resource_metadata_url
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import AuthSettings
+from mcp.shared.auth import ProtectedResourceMetadata
+from pydantic import AnyHttpUrl
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
@@ -234,6 +239,8 @@ def create_server(
             # Anonymous mode: FastMCP has no built-in auth enforcement.
             # AnonymousPermitMiddleware (added by build_http_app) handles
             # token extraction, validation, and anonymous fallback.
+            # FastMCP must NOT receive token_verifier/auth here -- that would
+            # activate RequireAuthMiddleware which conflicts with anonymous access.
             mcp = FastMCP(
                 "deriva-mcp-core",
                 instructions=_instructions,
@@ -245,6 +252,27 @@ def create_server(
             # Stash the verifier (may be None for anonymous-only mode) so
             # build_http_app() can wire up AnonymousPermitMiddleware correctly.
             mcp._allow_anonymous_verifier = verifier  # type: ignore[attr-defined]
+
+            # Register the RFC 9728 protected resource metadata endpoint manually.
+            # FastMCP only registers this when auth= is passed, but auth= requires
+            # token_verifier which conflicts with anonymous mode. Without this
+            # endpoint, OAuth clients cannot discover the authorization server and
+            # fall back to constructing a stripped URL (e.g. https://host/authorize
+            # instead of https://host/authn/authorize).
+            if cfg.credenza_url and cfg.server_url:
+                _resource_url = AnyHttpUrl(cfg.server_url)
+                _prm = ProtectedResourceMetadata(
+                    resource=_resource_url,
+                    authorization_servers=[AnyHttpUrl(cfg.credenza_url)],
+                )
+                _prm_path = urlparse(str(build_resource_metadata_url(_resource_url))).path
+
+                @mcp.custom_route(_prm_path, methods=["GET"])
+                async def _oauth_protected_resource(request: Request) -> Response:
+                    return PydanticJSONResponse(
+                        content=_prm,
+                        headers={"Cache-Control": "public, max-age=3600"},
+                    )
         else:
             auth = AuthSettings(
                 issuer_url=cfg.credenza_url,
