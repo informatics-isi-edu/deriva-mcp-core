@@ -135,11 +135,11 @@ async def index_table_data(
             rendered = serializer.serialize(table_name, row) if serializer is not None else None
             if rendered is None:
                 rendered = _generic_row_markdown(table_name, row)
-            for c in chunk_markdown(rendered, source=source, doc_type="data"):
+            for c in chunk_markdown(rendered, source=source, doc_type="catalog-data"):
                 batch_chunks.append(Chunk(
                     text=c.text,
                     source=source,
-                    doc_type="data",
+                    doc_type="catalog-data",
                     section_heading=c.section_heading,
                     heading_hierarchy=c.heading_hierarchy,
                     chunk_index=chunk_offset + len(batch_chunks),
