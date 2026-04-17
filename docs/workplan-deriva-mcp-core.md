@@ -2088,6 +2088,71 @@ modules. 6 tests in `TestPrompts` class in `test_tools.py`.
 
 ---
 
+## Planned: Per-User Request Correlation (Design Note)
+
+**Status:** Not started. Design only. Companion to the mcp-ui token accounting plan.
+
+---
+
+### Motivation
+
+mcp-core already logs `user_id` (principal) on every tool call via `audit_event()`.
+The gap is cross-layer correlation: given a mcp-ui audit log entry for a chat turn,
+there is no direct way to find the exact tool calls in mcp-core's log that belong to
+that turn without relying on `user_id + timestamp` proximity.
+
+An `X-Correlation-ID` header passed by mcp-ui on every MCP HTTP request would let
+operators join the two log streams precisely, which is useful for:
+
+- Debugging: "why did this chat turn take 12s?" -- trace to specific tool call latencies
+- Cost attribution: "how many DERIVA API calls did this query generate?"
+- Security review: "what did user X do during this specific session?"
+
+---
+
+### Design
+
+mcp-ui generates a UUID at the start of each `run_chat_turn` call and includes it as
+an HTTP header on all MCP calls made during that turn (tool calls, tool listings, prompt
+fetches):
+
+```
+X-Correlation-ID: <uuid4>
+```
+
+mcp-core reads this header and includes it in audit events emitted during the request.
+The header is advisory -- mcp-core does not require it, validate it, or use it for auth
+decisions. Absence is silently ignored.
+
+**mcp-core changes:**
+
+- In the ASGI middleware or the request auth flow, read `X-Correlation-ID` from the
+  incoming request headers and store it in a contextvar (alongside the existing
+  principal contextvar).
+- `audit_event()` in `telemetry/audit/logger.py` auto-injects `correlation_id` from
+  the contextvar when present (same pattern as `principal` injection today).
+- No changes to tool implementations -- the correlation ID flows through the existing
+  audit infrastructure transparently.
+
+**mcp-ui changes (see mcp-ui workplan):**
+
+- Generate `correlation_id` at the top of `run_chat_turn`.
+- Pass it as `X-Correlation-ID` in the `httpx` client used by `mcp_client.py`.
+- Include it in mcp-ui's own `audit_event("chat_complete", ...)` call.
+
+---
+
+### Implementation notes
+
+- The contextvar for `correlation_id` should be initialized to `None` (not a default
+  value) so log entries that predate this feature are distinguishable from entries
+  where a correlation ID was intentionally absent.
+- Do not add `correlation_id` to non-audit log lines (it would be noise in the
+  application log). Audit events only.
+- No new config flags needed -- the feature is passive on the mcp-core side.
+
+---
+
 ## Planned: facebase-deriva-mcp-plugin Plugin (Design Note)
 
 **Repo:** `facebase-deriva-mcp-plugin` (separate package, separate repo)
