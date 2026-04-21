@@ -736,6 +736,41 @@ class TestRagIngestDatasets:
         assert per_source["failed"] == 1
         assert per_source["chunks"] == 0
 
+    async def test_progress_is_reported(self, task_ctx, mock_store):
+        """TaskRecord.progress is updated as batches complete."""
+        import asyncio
+        _ctx, mgr = task_ctx
+
+        async def enricher(row, catalog):
+            return f"## Dataset {row['RID']}\n\nContent."
+
+        _ctx.rag_dataset_indexer(
+            schema="isa",
+            table="dataset",
+            enricher=enricher,
+            hostname="host.example.org",
+            catalog_id="1",
+        )
+
+        tools, _ = _register_rag(_ctx, mock_store)
+        mock_catalog = self._make_mock_catalog([{"RID": "A"}, {"RID": "B"}, {"RID": "C"}])
+
+        with patch("deriva_mcp_core.context._current_user_id") as mock_uid, \
+             patch("deriva_mcp_core.context._current_bearer_token") as mock_tok, \
+             patch("deriva_mcp_core.rag.tools.get_catalog", return_value=mock_catalog):
+            mock_uid.get.return_value = "alice"
+            mock_tok.get.return_value = "tok"
+            submit_result = json.loads(await tools["rag_ingest_datasets"]("host.example.org", "1"))
+            task_id = submit_result["task_id"]
+            await asyncio.sleep(0.1)
+
+        record = mgr.get(task_id, "alice")
+        assert record is not None
+        assert record.state == "completed"
+        # Progress should have been updated at least once during batch processing.
+        assert record.progress is not None
+        assert "rows" in record.progress
+
 
 # ---------------------------------------------------------------------------
 # Tests: _run_dataset_enricher URL generation
