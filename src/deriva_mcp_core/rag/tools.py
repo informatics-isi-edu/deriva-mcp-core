@@ -232,12 +232,17 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
         hostname: str,
         catalog_id: str,
         indexer: Any,
+        progress_callback: Any = None,
     ) -> dict | None:
         """Fetch rows, call the enricher, and index enriched chunks.
 
         Returns a dict {"rows_fetched": N, "failed": N, "chunks": N} on
         completion, or None if the run was skipped (locked, TTL fresh, or
         fetch error).
+
+        progress_callback: optional callable(str) -- called after each batch
+        with a human-readable progress string. Used by rag_ingest_datasets to
+        update the TaskRecord so the LLM can poll for progress.
 
         Source name: enriched:{hostname}:{catalog_id}:{schema}:{table}
         Staleness is checked per source using the indexer's ttl_seconds.
@@ -355,10 +360,18 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
                 if batch_chunks:
                     await store.add(batch_chunks)
                     total_chunks += len(batch_chunks)
+                batch_end = batch_start + len(batch) - 1
                 logger.debug(
                     "Dataset enricher batch %d-%d: %d chunks (%s)",
-                    batch_start, batch_start + len(batch) - 1, len(batch_chunks), source_name,
+                    batch_start, batch_end, len(batch_chunks), source_name,
                 )
+                if progress_callback is not None:
+                    done = batch_end + 1
+                    total = len(rows)
+                    pct = int(done * 100 / total) if total else 100
+                    progress_callback(
+                        f"{done}/{total} rows ({pct}%), {total_chunks} chunks indexed"
+                    )
 
             logger.info(
                 "Dataset enricher: %s -- %d rows fetched, %d failed, %d chunks indexed",
@@ -857,17 +870,33 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
             if not indexers:
                 return json.dumps({"error": f"No indexer matches source_name {source_name!r}"})
 
+        task_id_ref: list[str] = []
+
         async def _do_enrich() -> dict:
+            task_id = task_id_ref[0] if task_id_ref else None
             results = {}
-            for ix in indexers:
+            for i, ix in enumerate(indexers):
                 src = f"enriched:{hostname}:{catalog_id}:{ix.schema}:{ix.table}"
+                if task_id:
+                    ctx._task_manager.update_progress(
+                        task_id,
+                        f"indexer {i + 1}/{len(indexers)}: starting {src!r}",
+                    )
                 # Delete existing data so the TTL check passes on re-entry.
                 try:
                     await store.delete_source(src)
                 except Exception:
                     pass
+
+                def _make_progress_cb(tid: str) -> Any:
+                    def _cb(msg: str) -> None:
+                        ctx._task_manager.update_progress(tid, msg)
+                    return _cb
+
+                cb = _make_progress_cb(task_id) if task_id else None
                 try:
-                    run_stats = await _run_dataset_enricher(hostname, catalog_id, ix)
+                    run_stats = await _run_dataset_enricher(hostname, catalog_id, ix,
+                                                            progress_callback=cb)
                     results[src] = run_stats if run_stats is not None else {"skipped": True}
                 except Exception as exc:
                     results[src] = {"error": str(exc)}
@@ -878,6 +907,7 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
                 _do_enrich(),
                 name=f"rag_ingest_datasets {hostname}/{catalog_id}",
             )
+            task_id_ref.append(task_id)
         except Exception as exc:
             logger.error("rag_ingest_datasets failed to submit: %s", exc, exc_info=True)
             return json.dumps({"error": str(exc)})
