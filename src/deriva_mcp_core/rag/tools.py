@@ -601,23 +601,27 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
         """
         try:
             stats = await store.source_stats()
-            indexed: dict[str, dict] = {
-                name: {
-                    "chunk_count": s.chunk_count,
-                    "indexed_at": s.indexed_at,
-                }
-                for name, s in stats.items()
-            }
-            # Sources registered via plugin/config that have not yet been indexed.
-            # indexed keys are compound ("source-name:path/to/file"); extract prefix.
-            indexed_source_names = {k.split(":")[0] for k in indexed}
-            available_to_ingest = [src.name for src in all_sources if src.name not in indexed_source_names]
+            # Aggregate per-file entries (compound key "source-name:path") into
+            # per-source summaries to keep the response compact for large indexes.
+            aggregated: dict[str, dict] = {}
+            for key, s in stats.items():
+                src_name = key.split(":")[0]
+                entry = aggregated.setdefault(
+                    src_name, {"chunk_count": 0, "file_count": 0, "last_indexed_at": None}
+                )
+                entry["chunk_count"] += s.chunk_count
+                entry["file_count"] += 1
+                if s.indexed_at and (
+                    entry["last_indexed_at"] is None or s.indexed_at > entry["last_indexed_at"]
+                ):
+                    entry["last_indexed_at"] = s.indexed_at
+            available_to_ingest = [src.name for src in all_sources if src.name not in aggregated]
             return json.dumps(
                 {
                     "enabled": True,
                     "vector_backend": settings.vector_backend,
                     "available_to_ingest": available_to_ingest,
-                    "indexed_sources": indexed,
+                    "indexed_sources": aggregated,
                 }
             )
         except Exception as exc:

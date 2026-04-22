@@ -398,8 +398,10 @@ class TestRagStatus:
         ]
         tools, _ = _register_rag(ctx, mock_store)
         result = json.loads(await tools["rag_status"]())
-        assert "myrepo:file.md" in result["indexed_sources"]
-        assert result["indexed_sources"]["myrepo:file.md"]["chunk_count"] == 1
+        # indexed_sources is aggregated by source name prefix, not per-file
+        assert "myrepo" in result["indexed_sources"]
+        assert result["indexed_sources"]["myrepo"]["chunk_count"] == 1
+        assert result["indexed_sources"]["myrepo"]["file_count"] == 1
 
     async def test_status_lists_unindexed_registered_sources(self, ctx, mock_store):
         # Built-in sources are registered but the mock store has no chunks for them.
