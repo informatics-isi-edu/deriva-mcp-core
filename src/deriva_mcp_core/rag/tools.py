@@ -603,9 +603,12 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
             stats = await store.source_stats()
             # Aggregate per-file entries (compound key "source-name:path") into
             # per-source summaries to keep the response compact for large indexes.
+            # Enriched dataset sources use "enriched:{host}:{catalog}:{schema}:{table}";
+            # keep the full key so each enriched source is identifiable.
+            # Doc sources use "source-name:path/to/file"; group by the name prefix.
             aggregated: dict[str, dict] = {}
             for key, s in stats.items():
-                src_name = key.split(":")[0]
+                src_name = key if key.startswith("enriched:") else key.split(":")[0]
                 entry = aggregated.setdefault(
                     src_name, {"chunk_count": 0, "file_count": 0, "last_indexed_at": None}
                 )
