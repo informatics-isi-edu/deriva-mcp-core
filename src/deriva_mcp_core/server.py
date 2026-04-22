@@ -207,7 +207,7 @@ def create_server(
         logger.info("Hostname map active: %s", cfg.hostname_map)
         init_hostname_map(cfg.hostname_map)
 
-    init_audit_logger(filename=cfg.audit_logfile_path, use_syslog=cfg.audit_use_syslog)
+    init_audit_logger(use_syslog=cfg.audit_use_syslog)
 
     if cfg.disable_mutating_tools:
         logger.warning(

@@ -17,7 +17,7 @@ import datetime
 import logging
 import os
 from logging import StreamHandler
-from logging.handlers import SysLogHandler, TimedRotatingFileHandler
+from logging.handlers import SysLogHandler
 
 from pythonjsonlogger import json
 
@@ -27,41 +27,27 @@ logger = logging.getLogger(__name__)
 svc_logger = logging.getLogger("deriva_mcp")
 
 
-def init_audit_logger(filename="deriva-mcp-audit.log", use_syslog=False):
+def init_audit_logger(use_syslog=False):
     """Initialize the structured JSON audit logger.
 
     Priority order for the log handler:
       1. SysLogHandler to /dev/log (when use_syslog=True and socket is writable)
-      2. TimedRotatingFileHandler (daily rotation, no backup count limit)
-      3. StreamHandler (last-resort fallback)
+      2. StreamHandler to stderr (collected by the container runtime log driver
+         or redirected by the process supervisor on bare-metal deployments)
 
     Args:
-        filename: Path to the rotating log file (used when syslog is unavailable).
-        use_syslog: Prefer syslog over file-based logging.
+        use_syslog: Prefer syslog over stderr. Intended for non-containerized
+            deployments where rsyslog is the centralized log collector.
     """
-    log_handler = StreamHandler()  # last-ditch fallback
+    log_handler = StreamHandler()  # default: stderr
 
     syslog_socket = "/dev/log"
     if use_syslog and (os.path.exists(syslog_socket) and os.access(syslog_socket, os.W_OK)):  # pragma: no cover
         try:
             log_handler = SysLogHandler(address=syslog_socket, facility=SysLogHandler.LOG_LOCAL1)
             log_handler.ident = "deriva-mcp-audit: "
-            logger.propagate = False
         except Exception as e:
-            svc_logger.warning("Failed to initialize syslog audit handler, falling back: %s", e)
-            use_syslog = False
-
-    if not use_syslog:
-        try:
-            log_handler = TimedRotatingFileHandler(
-                filename=filename, when="D", interval=1, backupCount=0
-            )
-        except Exception as e:  # pragma: no cover
-            svc_logger.warning(
-                "Failed to initialize %s, falling back to StreamHandler: %s",
-                log_handler.__class__.__name__,
-                e,
-            )
+            svc_logger.warning("Failed to initialize syslog audit handler, falling back to stderr: %s", e)
 
     formatter = json.JsonFormatter("{message}", style="{", rename_fields={"message": "event"})
     log_handler.setFormatter(formatter)

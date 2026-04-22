@@ -122,8 +122,17 @@ async def test_verify_token_logs_principal(httpx_mock, test_settings, caplog):
         url=_token_url(test_settings),
         json={"access_token": _DERIVED, "expires_in": 1800},
     )
-    with caplog.at_level(logging.INFO, logger="deriva_mcp_core.auth.verifier"):
-        await _make_verifier(test_settings).verify_token(_TOKEN)
+    # The audit logger has propagate=False so caplog's root handler cannot see
+    # its records. Temporarily attach caplog's handler directly and set the
+    # level (default is WARNING in tests since init_audit_logger is not called).
+    audit_log = logging.getLogger("deriva_mcp_core.telemetry.audit.logger")
+    audit_log.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.INFO, logger="deriva_mcp_core.telemetry.audit.logger"):
+            with caplog.at_level(logging.INFO, logger="deriva_mcp_core.auth.verifier"):
+                await _make_verifier(test_settings).verify_token(_TOKEN)
+    finally:
+        audit_log.removeHandler(caplog.handler)
     assert any(f"{_ISS}/{_SUB}" in r.message for r in caplog.records)
     assert any("user@example.org" in r.message for r in caplog.records)
 

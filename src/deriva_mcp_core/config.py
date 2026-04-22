@@ -111,7 +111,6 @@ class Settings(BaseSettings):
     introspect_cache_ttl_seconds: int = 60
 
     # Audit logging
-    audit_logfile_path: str = "deriva-mcp-audit.log"
     audit_use_syslog: bool = False
 
     # Access logging (uvicorn request log)
