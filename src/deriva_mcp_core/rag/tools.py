@@ -496,10 +496,28 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
         if source_name and not targets:
             return json.dumps({"error": f"Unknown source: {source_name!r}"})
 
+        task_id_ref: list[str] = []
+
         async def _do_update() -> dict:
+            task_id = task_id_ref[0] if task_id_ref else None
             counts = {}
-            for src in targets:
-                counts[src.name] = await _ingest_any(src, force=force)
+            for i, src in enumerate(targets):
+                if task_id:
+                    ctx._task_manager.update_progress(
+                        task_id,
+                        f"source {i + 1}/{len(targets)}: starting {src.name!r}",
+                    )
+
+                def _make_progress_cb(name: str, tid: str):
+                    def _cb(crawled: int, ingested: int) -> None:
+                        ctx._task_manager.update_progress(
+                            tid,
+                            f"{name!r}: {crawled} pages crawled, {ingested} ingested",
+                        )
+                    return _cb
+
+                cb = _make_progress_cb(src.name, task_id) if task_id else None
+                counts[src.name] = await _ingest_any(src, force=force, progress_cb=cb)
             return {"updated": counts}
 
         task_label = source_name or "all-sources"
@@ -508,6 +526,7 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
                 _do_update(),
                 name=f"rag_update_docs {task_label}",
             )
+            task_id_ref.append(task_id)
         except Exception as exc:
             logger.error("rag_update_docs_async failed to submit: %s", exc, exc_info=True)
             return json.dumps({"error": str(exc)})

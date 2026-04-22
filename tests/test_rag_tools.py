@@ -379,6 +379,147 @@ class TestRagIngest:
 
 
 # ---------------------------------------------------------------------------
+# Tests: rag_update_docs_async (background task submission + progress)
+# ---------------------------------------------------------------------------
+
+
+class TestRagUpdateDocsAsync:
+    @pytest.fixture()
+    def task_ctx(self, capturing_mcp):
+        from deriva_mcp_core.tasks.manager import TaskManager
+        mgr = TaskManager()
+        _ctx = PluginContext(capturing_mcp, task_manager=mgr)
+        _set_plugin_context(_ctx)
+        yield _ctx, mgr
+        _set_plugin_context(None)
+
+    async def test_unknown_source_returns_error(self, ctx, mock_store):
+        tools, _ = _register_rag(ctx, mock_store)
+        result = json.loads(await tools["rag_update_docs_async"]("nonexistent-source"))
+        assert "error" in result
+
+    async def test_submits_task_and_returns_task_id(self, task_ctx, mock_store):
+        import asyncio
+        _ctx, mgr = task_ctx
+        tools, docs_mgr = _register_rag(_ctx, mock_store)
+        with patch("deriva_mcp_core.context._current_user_id") as mock_uid, \
+             patch("deriva_mcp_core.context._current_bearer_token") as mock_tok:
+            mock_uid.get.return_value = "alice"
+            mock_tok.get.return_value = "tok"
+            result = json.loads(await tools["rag_update_docs_async"]("deriva-py-docs"))
+        assert result["status"] == "submitted"
+        assert "task_id" in result
+        await asyncio.sleep(0.1)
+        record = mgr.get(result["task_id"], "alice")
+        assert record is not None
+        assert record.state == "completed"
+        assert "deriva-py-docs" in record.result["updated"]
+
+    async def test_progress_update_fires_for_each_source(self, task_ctx, mock_store):
+        """task_id_ref must be populated before _do_update runs so that
+        update_progress is called with the per-source 'starting' message."""
+        import asyncio
+        _ctx, mgr = task_ctx
+
+        captured_progress: list[str] = []
+        original_update = mgr.update_progress
+
+        def _track_progress(task_id, msg):
+            captured_progress.append(msg)
+            original_update(task_id, msg)
+
+        mgr.update_progress = _track_progress
+
+        tools, _ = _register_rag(_ctx, mock_store)
+
+        with patch("deriva_mcp_core.context._current_user_id") as mock_uid, \
+             patch("deriva_mcp_core.context._current_bearer_token") as mock_tok:
+            mock_uid.get.return_value = "alice"
+            mock_tok.get.return_value = "tok"
+            await tools["rag_update_docs_async"]("deriva-py-docs")
+        await asyncio.sleep(0.1)
+        # The task body must emit at least one "starting" progress message,
+        # proving task_id_ref was populated before _do_update executed.
+        assert any("starting" in m for m in captured_progress), captured_progress
+
+    async def test_progress_cb_passed_to_ingest_web(self, task_ctx, mock_store):
+        """_make_progress_cb must be forwarded to ingest_web for WebSource targets.
+        Verified by injecting a WebSource via ctx.rag_web_source() and capturing
+        the progress_cb kwarg that ingest_web receives."""
+        import asyncio
+        from deriva_mcp_core.plugin.api import RagWebSourceDeclaration
+        _ctx, mgr = task_ctx
+
+        captured_progress: list[str] = []
+        original_update = mgr.update_progress
+
+        def _track_progress(task_id, msg):
+            captured_progress.append(msg)
+            original_update(task_id, msg)
+
+        mgr.update_progress = _track_progress
+
+        # Inject a WebSource declaration before register() builds all_sources.
+        _ctx._rag_web_sources.append(
+            RagWebSourceDeclaration(
+                name="test-web",
+                base_url="https://example.com",
+                max_pages=5,
+                doc_type="user-guide",
+                allowed_domains=[],
+                include_path_prefix="",
+                rate_limit_seconds=0.0,
+            )
+        )
+
+        captured_cbs: list = []
+
+        mock_docs_mgr = MagicMock()
+        mock_docs_mgr_cls = MagicMock(return_value=mock_docs_mgr)
+
+        async def _ingest_web_capturing(src, *, force=False, progress_cb=None):
+            captured_cbs.append(progress_cb)
+            if progress_cb is not None:
+                progress_cb(3, 2)
+            return 2
+
+        mock_docs_mgr.ingest_web = AsyncMock(side_effect=_ingest_web_capturing)
+
+        with (
+            patch("deriva_mcp_core.rag.config.RAGSettings") as mock_settings_cls,
+            patch("deriva_mcp_core.rag.store.get_store", return_value=mock_store),
+            patch("deriva_mcp_core.rag.docs.RAGDocsManager", mock_docs_mgr_cls),
+            patch("deriva_mcp_core.context._current_user_id") as mock_uid,
+            patch("deriva_mcp_core.context._current_bearer_token") as mock_tok,
+        ):
+            mock_settings_cls.return_value = _make_settings()
+            mock_uid.get.return_value = "alice"
+            mock_tok.get.return_value = "tok"
+            from deriva_mcp_core.rag import register
+            register(_ctx)
+            tools = _ctx._mcp.tools
+            await tools["rag_update_docs_async"]("test-web")
+
+        await asyncio.sleep(0.1)
+        # ingest_web must have received a non-None progress_cb.
+        assert captured_cbs and captured_cbs[0] is not None
+        # The cb must have produced a progress message with crawl counts.
+        assert any("crawled" in m for m in captured_progress), captured_progress
+
+    async def test_submit_error_returns_error(self, capturing_mcp, mock_store):
+        _ctx = PluginContext(capturing_mcp, task_manager=None)
+        _set_plugin_context(_ctx)
+        tools, _ = _register_rag(_ctx, mock_store)
+        with patch("deriva_mcp_core.context._current_user_id") as mock_uid, \
+             patch("deriva_mcp_core.context._current_bearer_token") as mock_tok:
+            mock_uid.get.return_value = "alice"
+            mock_tok.get.return_value = None
+            result = json.loads(await tools["rag_update_docs_async"]("deriva-py-docs"))
+        assert "error" in result
+        _set_plugin_context(None)
+
+
+# ---------------------------------------------------------------------------
 # Tests: rag_status
 # ---------------------------------------------------------------------------
 
