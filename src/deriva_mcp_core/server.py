@@ -127,6 +127,11 @@ def _init_logging(debug: bool = False, app_use_syslog: bool = False) -> None:  #
         lib_log.setLevel(logging.INFO)
         lib_log.propagate = False
 
+    # Suppress per-request noise from MCP internals -- these emit an INFO line
+    # for every tool call and session termination which adds no diagnostic value.
+    for noisy in ("mcp.server.lowlevel.server", "mcp.server.streamable_http"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     # Detach uvicorn.access from the main log stream.  Handlers are added
     # later by _init_access_logging() once settings are available.
     access_log = logging.getLogger("uvicorn.access")

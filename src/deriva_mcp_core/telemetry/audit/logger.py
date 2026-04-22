@@ -67,6 +67,7 @@ def init_audit_logger(filename="deriva-mcp-audit.log", use_syslog=False):
     log_handler.setFormatter(formatter)
     logger.addHandler(log_handler)
     logger.setLevel(logging.INFO)
+    logger.propagate = False  # prevent double-emit through the root handler
 
 
 def audit_event(event, **kwargs):
