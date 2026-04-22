@@ -13,7 +13,8 @@ Key behaviours:
 - Deduplication by MD5 hash of extracted text -- multiple URLs with
   identical content (common in Chaise facet URLs) produce one result.
 - Path loop detection: skips URLs where any path segment appears more
-  than twice, or where path depth exceeds max_depth (default 10).
+  than once, or where path depth exceeds max_depth (default 10).
+  Loop URLs are filtered before enqueueing to prevent queue explosion.
 - Rate limiting: configurable sleep between requests (default 1.0 s).
 - Domain scoping: only follows links in allowed_domains (defaults to
   base_url domain).
@@ -112,12 +113,18 @@ class WebCrawler:
         return True
 
     def _has_loop(self, url: str) -> bool:
-        """Return True if the URL path looks like a crawler loop."""
+        """Return True if the URL path looks like a crawler loop.
+
+        Catches two patterns:
+        - Path depth exceeds max_depth.
+        - Any path segment appears more than once (e.g. /search/search/ or
+          /summary/tools/search/summary/ where 'summary' repeats).
+        """
         segments = [s for s in urlparse(url).path.split("/") if s]
         if len(segments) > self._max_depth:
             return True
         counts = Counter(segments)
-        return any(c > 2 for c in counts.values())
+        return any(c > 1 for c in counts.values())
 
     @staticmethod
     def _normalize_url(url: str) -> str:
@@ -235,9 +242,11 @@ class WebCrawler:
 
                 soup = BeautifulSoup(resp.text, "html.parser")
 
-                # Always enqueue links (even from non-indexable pages)
+                # Always enqueue links (even from non-indexable pages).
+                # Pre-filter loop URLs here so the queue never accumulates
+                # combinatorial path explosions from nav links.
                 for link in self._extract_links(soup, url):
-                    if link not in visited:
+                    if link not in visited and not self._has_loop(link):
                         queue.append(link)
 
                 if not self._is_indexable(url):
