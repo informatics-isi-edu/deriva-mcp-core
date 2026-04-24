@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import logging
 import os
+import time
 from urllib.parse import urlparse
 
 from deriva.core import get_credential as _get_credential
@@ -152,6 +153,20 @@ def _set_plugin_log_level(plugin_packages: list[str], debug: bool = False) -> No
         logging.getLogger(pkg).setLevel(level)
 
 
+class _HealthCheckThrottle(logging.Filter):  # pragma: no cover
+    _interval = 600.0
+    _last_logged: float = 0.0
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if "/health" not in record.getMessage():
+            return True
+        now = time.monotonic()
+        if now - self.__class__._last_logged >= self.__class__._interval:
+            self.__class__._last_logged = now
+            return True
+        return False
+
+
 def _init_access_logging(cfg: Settings) -> None:  # pragma: no cover
     """Route uvicorn access logs to a dedicated file and/or syslog facility.
 
@@ -163,6 +178,7 @@ def _init_access_logging(cfg: Settings) -> None:  # pragma: no cover
 
     fmt = logging.Formatter("%(asctime)s %(message)s")
     access_log = logging.getLogger("uvicorn.access")
+    access_log.addFilter(_HealthCheckThrottle())
 
     if cfg.access_logfile_path:
         fh = RotatingFileHandler(cfg.access_logfile_path, maxBytes=50_000_000, backupCount=5)
