@@ -116,6 +116,7 @@ class RagDatasetIndexerDeclaration:
     catalog_id: str | None  # if set, only run when connected catalog_id matches
     limit: int | None  # if set, appended as ?limit=N to the ERMrest fetch URL
     auto_enrich: bool = False  # if False, skip on catalog connect; trigger via rag_ingest_datasets
+    is_public: bool = True  # if False, log a startup warning; per-user isolation not yet implemented
 
 
 _UNSET = object()
@@ -384,6 +385,7 @@ class PluginContext:
         catalog_id: str | None = None,
         limit: int | None = None,
         auto_enrich: bool = False,
+        is_public: bool = True,
     ) -> None:
         """Register a dataset enrichment hook for the RAG subsystem.
 
@@ -410,7 +412,22 @@ class PluginContext:
             auto_enrich: If True, run this enricher automatically on catalog
                 connect (TTL-gated). If False (default), enrichment only runs
                 when explicitly triggered via rag_ingest_datasets.
+            is_public: If True (default), the enriched index is shared across
+                all users -- correct when the filter already restricts to
+                publicly accessible rows (e.g. released=True). Set to False to
+                signal that the enriched data may vary by user ACL; this emits a
+                startup warning because per-user enrichment is not yet
+                implemented.
         """
+        import logging as _logging
+        if not is_public:
+            _logging.getLogger(__name__).warning(
+                "rag_dataset_indexer %s:%s registered with is_public=False but "
+                "per-user enrichment is not yet implemented -- enriched index will "
+                "be shared across all users; ACL-sensitive rows should not be indexed",
+                schema,
+                table,
+            )
         self._rag_dataset_indexers.append(
             RagDatasetIndexerDeclaration(
                 schema=schema,
@@ -423,6 +440,7 @@ class PluginContext:
                 catalog_id=catalog_id,
                 limit=limit,
                 auto_enrich=auto_enrich,
+                is_public=is_public,
             )
         )
 

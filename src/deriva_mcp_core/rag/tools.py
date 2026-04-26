@@ -410,12 +410,14 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
                 where["doc_type"] = doc_type
             results = await store.search(query, limit=limit, where=where if where else None)
             if hostname and catalog_id:
+                # Resolve the caller's identity once; used for both schema and
+                # data: source filtering below.
+                user_id = resolve_user_identity(hostname)
+
                 # Restrict schema results to this caller's ACL visibility class.
                 # Two users whose /schema responses are identical share the same
                 # hash and therefore the same index entry. A restricted user gets
-                # a different hash and only sees their own entry. Non-schema
-                # sources (user-guide, data) are always included.
-                user_id = resolve_user_identity(hostname)
+                # a different hash and only sees their own entry.
                 user_hash = _user_schema_hashes.get((user_id, hostname, catalog_id))
                 if user_hash:
                     own_source = schema_source_name(hostname, catalog_id, user_hash)
@@ -426,6 +428,26 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
                 else:
                     # Schema not yet indexed for this user -- exclude schema results.
                     results = [r for r in results if not r.source.startswith("schema:")]
+
+                # Restrict data: results to this user's own per-user source.
+                # data: sources are named data:{hostname}:{catalog_id}:{user_id};
+                # allowing cross-user results would expose another user's indexed rows.
+                own_data = f"data:{hostname}:{catalog_id}:{user_id}"
+                results = [
+                    r for r in results
+                    if not r.source.startswith("data:") or r.source == own_data
+                ]
+
+                # Restrict enriched: results to this catalog only.
+                # enriched: sources are named enriched:{hostname}:{catalog_id}:{schema}:{table}
+                # and are shared across users (operators scope them with filters such as
+                # released=True). Excluding other catalogs prevents cross-catalog bleed
+                # when the search is scoped to a specific hostname+catalog_id.
+                own_enriched_prefix = f"enriched:{hostname}:{catalog_id}:"
+                results = [
+                    r for r in results
+                    if not r.source.startswith("enriched:") or r.source.startswith(own_enriched_prefix)
+                ]
             out = []
             for r in results:
                 entry: dict = {

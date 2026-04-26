@@ -129,6 +129,43 @@ def _register_rag(ctx, store) -> tuple[dict[str, Any], MagicMock]:
 # ---------------------------------------------------------------------------
 
 
+class TestRagDatasetIndexerIsPublic:
+    def test_is_public_true_no_warning(self, ctx, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING, logger="deriva_mcp_core.plugin.api"):
+            ctx.rag_dataset_indexer(
+                schema="isa", table="dataset",
+                enricher=lambda row, catalog: "",
+                is_public=True,
+            )
+        assert not any("per-user enrichment" in m for m in caplog.messages)
+
+    def test_is_public_false_emits_warning(self, ctx, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING, logger="deriva_mcp_core.plugin.api"):
+            ctx.rag_dataset_indexer(
+                schema="isa", table="dataset",
+                enricher=lambda row, catalog: "",
+                is_public=False,
+            )
+        assert any("per-user enrichment" in m for m in caplog.messages)
+
+    def test_is_public_stored_on_declaration(self, ctx):
+        ctx.rag_dataset_indexer(
+            schema="isa", table="dataset",
+            enricher=lambda row, catalog: "",
+            is_public=False,
+        )
+        assert ctx._rag_dataset_indexers[-1].is_public is False
+
+    def test_is_public_defaults_true(self, ctx):
+        ctx.rag_dataset_indexer(
+            schema="isa", table="dataset",
+            enricher=lambda row, catalog: "",
+        )
+        assert ctx._rag_dataset_indexers[-1].is_public is True
+
+
 class TestRegisterDisabled:
     def test_no_tools_when_disabled(self, ctx):
         with patch("deriva_mcp_core.rag.config.RAGSettings") as mock_cls:
@@ -271,6 +308,132 @@ class TestRagSearch:
         sources = [r["source"] for r in result]
         assert other_source not in sources
         assert "deriva-py-docs:guide.md" in sources
+
+    async def test_data_results_filtered_to_caller_when_scoped(self, ctx, mock_store):
+        # data: chunks belonging to another user must be excluded when the search
+        # is scoped to a specific hostname+catalog_id. resolve_user_identity()
+        # returns "anonymous" in tests (no contextvar set), so own source is
+        # data:localhost:1:anonymous and bob's source must be excluded.
+        mock_store.set_search_results(
+            [
+                SearchResult(
+                    text="own row", source="data:localhost:1:anonymous",
+                    doc_type="catalog-data", score=0.9, metadata={},
+                ),
+                SearchResult(
+                    text="bobs row", source="data:localhost:1:bob@test.org",
+                    doc_type="catalog-data", score=0.85, metadata={},
+                ),
+                SearchResult(
+                    text="doc chunk", source="deriva-py-docs:guide.md",
+                    doc_type="user-guide", score=0.8, metadata={},
+                ),
+            ]
+        )
+        tools, _ = _register_rag(ctx, mock_store)
+        result = json.loads(await tools["rag_search"]("q", hostname="localhost", catalog_id="1"))
+        sources = [r["source"] for r in result]
+        assert "data:localhost:1:anonymous" in sources
+        assert "data:localhost:1:bob@test.org" not in sources
+        assert "deriva-py-docs:guide.md" in sources
+
+    async def test_data_results_from_other_catalog_excluded_when_scoped(self, ctx, mock_store):
+        # data: chunks scoped to a different catalog must be excluded even when
+        # the user_id matches, because the search is scoped to localhost:1.
+        mock_store.set_search_results(
+            [
+                SearchResult(
+                    text="own row", source="data:localhost:1:anonymous",
+                    doc_type="catalog-data", score=0.9, metadata={},
+                ),
+                SearchResult(
+                    text="other catalog row", source="data:localhost:2:anonymous",
+                    doc_type="catalog-data", score=0.85, metadata={},
+                ),
+            ]
+        )
+        tools, _ = _register_rag(ctx, mock_store)
+        result = json.loads(await tools["rag_search"]("q", hostname="localhost", catalog_id="1"))
+        sources = [r["source"] for r in result]
+        assert "data:localhost:1:anonymous" in sources
+        assert "data:localhost:2:anonymous" not in sources
+
+    async def test_data_results_unfiltered_without_hostname_catalog(self, ctx, mock_store):
+        # Without hostname+catalog_id, no scoping is applied and all data: results
+        # are returned as-is (global search mode).
+        mock_store.set_search_results(
+            [
+                SearchResult(
+                    text="alice row", source="data:localhost:1:alice@test.org",
+                    doc_type="catalog-data", score=0.9, metadata={},
+                ),
+                SearchResult(
+                    text="bob row", source="data:localhost:1:bob@test.org",
+                    doc_type="catalog-data", score=0.85, metadata={},
+                ),
+            ]
+        )
+        tools, _ = _register_rag(ctx, mock_store)
+        result = json.loads(await tools["rag_search"]("q"))
+        sources = [r["source"] for r in result]
+        assert "data:localhost:1:alice@test.org" in sources
+        assert "data:localhost:1:bob@test.org" in sources
+
+    async def test_enriched_results_filtered_to_catalog_when_scoped(self, ctx, mock_store):
+        # enriched: chunks from the target catalog are included; chunks from other
+        # catalogs or hostnames are excluded when the search is scoped.
+        mock_store.set_search_results(
+            [
+                SearchResult(
+                    text="own dataset", source="enriched:localhost:1:isa:dataset",
+                    doc_type="catalog-data", score=0.9, metadata={},
+                ),
+                SearchResult(
+                    text="own entry", source="enriched:localhost:1:pdb:entry",
+                    doc_type="catalog-data", score=0.88, metadata={},
+                ),
+                SearchResult(
+                    text="other catalog", source="enriched:localhost:2:isa:dataset",
+                    doc_type="catalog-data", score=0.85, metadata={},
+                ),
+                SearchResult(
+                    text="other host", source="enriched:otherhost.org:1:isa:dataset",
+                    doc_type="catalog-data", score=0.82, metadata={},
+                ),
+                SearchResult(
+                    text="doc chunk", source="deriva-py-docs:guide.md",
+                    doc_type="user-guide", score=0.8, metadata={},
+                ),
+            ]
+        )
+        tools, _ = _register_rag(ctx, mock_store)
+        result = json.loads(await tools["rag_search"]("q", hostname="localhost", catalog_id="1"))
+        sources = [r["source"] for r in result]
+        assert "enriched:localhost:1:isa:dataset" in sources
+        assert "enriched:localhost:1:pdb:entry" in sources
+        assert "enriched:localhost:2:isa:dataset" not in sources
+        assert "enriched:otherhost.org:1:isa:dataset" not in sources
+        assert "deriva-py-docs:guide.md" in sources
+
+    async def test_enriched_results_unfiltered_without_hostname_catalog(self, ctx, mock_store):
+        # Without hostname+catalog_id, enriched: results from all catalogs pass through.
+        mock_store.set_search_results(
+            [
+                SearchResult(
+                    text="cat1", source="enriched:localhost:1:isa:dataset",
+                    doc_type="catalog-data", score=0.9, metadata={},
+                ),
+                SearchResult(
+                    text="cat2", source="enriched:localhost:2:isa:dataset",
+                    doc_type="catalog-data", score=0.85, metadata={},
+                ),
+            ]
+        )
+        tools, _ = _register_rag(ctx, mock_store)
+        result = json.loads(await tools["rag_search"]("q"))
+        sources = [r["source"] for r in result]
+        assert "enriched:localhost:1:isa:dataset" in sources
+        assert "enriched:localhost:2:isa:dataset" in sources
 
 
 # ---------------------------------------------------------------------------
