@@ -358,6 +358,71 @@ class TestRagSearch:
         assert "data:localhost:1:anonymous" in sources
         assert "data:localhost:2:anonymous" not in sources
 
+    async def test_data_results_per_rid_source_naming_accepted(self, ctx, mock_store):
+        # data: sources may be either bulk-per-user (data:host:cat:user) or
+        # per-RID (data:host:cat:user:table:rid). Both shapes belong to the
+        # same caller and must be accepted; cross-user per-RID names must
+        # still be excluded. This pins the v1.0 -> v1.x source-naming
+        # evolution downstream plugins (e.g. deriva-ml-mcp v1.3 surgical
+        # re-index) rely on.
+        mock_store.set_search_results(
+            [
+                SearchResult(
+                    text="own bulk row", source="data:localhost:1:anonymous",
+                    doc_type="catalog-data", score=0.9, metadata={},
+                ),
+                SearchResult(
+                    text="own per-rid dataset row",
+                    source="data:localhost:1:anonymous:dataset:1-AAAA",
+                    doc_type="catalog-data", score=0.88, metadata={},
+                ),
+                SearchResult(
+                    text="own per-rid execution row",
+                    source="data:localhost:1:anonymous:execution:2-BBBB",
+                    doc_type="catalog-data", score=0.86, metadata={},
+                ),
+                SearchResult(
+                    text="bobs per-rid row",
+                    source="data:localhost:1:bob@test.org:dataset:1-CCCC",
+                    doc_type="catalog-data", score=0.84, metadata={},
+                ),
+            ]
+        )
+        tools, _ = _register_rag(ctx, mock_store)
+        result = json.loads(await tools["rag_search"]("q", hostname="localhost", catalog_id="1"))
+        sources = [r["source"] for r in result]
+        assert "data:localhost:1:anonymous" in sources
+        assert "data:localhost:1:anonymous:dataset:1-AAAA" in sources
+        assert "data:localhost:1:anonymous:execution:2-BBBB" in sources
+        assert "data:localhost:1:bob@test.org:dataset:1-CCCC" not in sources
+
+    async def test_data_results_per_rid_prefix_overlap_does_not_leak(self, ctx, mock_store):
+        # Defensive: the per-RID accept rule uses (own_data + ":") as the
+        # prefix to prevent a malicious user_id like "anonymous2" from
+        # passing the filter via accidental string-prefix overlap with
+        # "anonymous". Without the trailing colon, "data:h:c:anonymous2:..."
+        # would match the prefix "data:h:c:anonymous" -- the colon
+        # eliminates that.
+        mock_store.set_search_results(
+            [
+                SearchResult(
+                    text="own row",
+                    source="data:localhost:1:anonymous:dataset:1-AAAA",
+                    doc_type="catalog-data", score=0.9, metadata={},
+                ),
+                SearchResult(
+                    text="adversary user with prefix-overlap user_id",
+                    source="data:localhost:1:anonymous2:dataset:1-EVIL",
+                    doc_type="catalog-data", score=0.85, metadata={},
+                ),
+            ]
+        )
+        tools, _ = _register_rag(ctx, mock_store)
+        result = json.loads(await tools["rag_search"]("q", hostname="localhost", catalog_id="1"))
+        sources = [r["source"] for r in result]
+        assert "data:localhost:1:anonymous:dataset:1-AAAA" in sources
+        assert "data:localhost:1:anonymous2:dataset:1-EVIL" not in sources
+
     async def test_data_results_unfiltered_without_hostname_catalog(self, ctx, mock_store):
         # Without hostname+catalog_id, no scoping is applied and all data: results
         # are returned as-is (global search mode).

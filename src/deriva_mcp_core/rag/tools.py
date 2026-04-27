@@ -429,13 +429,24 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
                     # Schema not yet indexed for this user -- exclude schema results.
                     results = [r for r in results if not r.source.startswith("schema:")]
 
-                # Restrict data: results to this user's own per-user source.
-                # data: sources are named data:{hostname}:{catalog_id}:{user_id};
-                # allowing cross-user results would expose another user's indexed rows.
+                # Restrict data: results to this user's own per-user source(s).
+                # data: sources are named either:
+                #   data:{hostname}:{catalog_id}:{user_id}             (bulk per-user)
+                # or
+                #   data:{hostname}:{catalog_id}:{user_id}:{table}:{rid} (per-RID, e.g.
+                #   deriva-ml-mcp's surgical re-index path).
+                # The accept rule is: exact-match on the bulk form, OR prefix-match
+                # on the per-RID form (own_data + ":"). The trailing colon prevents
+                # a malicious user_id like "evil-userA" from matching "data:h:c:userA"
+                # via accidental string-prefix overlap. Allowing cross-user results
+                # would expose another user's indexed rows.
                 own_data = f"data:{hostname}:{catalog_id}:{user_id}"
+                own_data_per_rid_prefix = own_data + ":"
                 results = [
                     r for r in results
-                    if not r.source.startswith("data:") or r.source == own_data
+                    if not r.source.startswith("data:")
+                    or r.source == own_data
+                    or r.source.startswith(own_data_per_rid_prefix)
                 ]
 
                 # Restrict enriched: results to this catalog only.
