@@ -269,16 +269,13 @@ def resolve_user_identity(hostname: str) -> str:
 
 
 def get_request_credential() -> dict:
-    """Return the per-request credential for the current async context.
+    """Return the per-request credential from the HTTP-mode contextvar.
 
-    Use this when passing credentials to a higher-level API that constructs its
-    own client, e.g.: DerivaML(hostname, catalog_id, credential=get_request_credential())
+    HTTP mode only. The contextvar is set by the auth verifier before each
+    request and is never populated in stdio mode. Raises RuntimeError in stdio
+    mode -- use get_credential(hostname) instead when the hostname is known.
 
-    Distinct from deriva.core.get_credential(), which reads credentials from the
-    local filesystem. This function reads from the per-request contextvar set by
-    the auth verifier (HTTP) or server startup (stdio).
-
-    Raises RuntimeError if called outside a tool or resource handler context.
+    Raises RuntimeError if called outside an HTTP request context.
     """
     credential = _current_credential.get()
     if credential is None:
@@ -287,6 +284,22 @@ def get_request_credential() -> dict:
             "This function must be called from within a tool or resource handler."
         )
     return credential
+
+
+def get_credential(hostname: str) -> dict:
+    """Return the credential for the given hostname in the current request context.
+
+    Works in both HTTP and stdio mode:
+    - HTTP mode: returns the per-request derived token (hostname is ignored;
+      the token is already scoped to the right server by the token exchange).
+    - stdio mode: reads from ~/.deriva/credential.json for the (remapped) hostname.
+
+    Use this in plugins that construct higher-level DERIVA clients directly, e.g.:
+        DerivaML(hostname, catalog_id, credential=get_credential(hostname))
+
+    Raises RuntimeError in HTTP mode if called outside a request context.
+    """
+    return _get_credential_fn(_remap(hostname))
 
 
 # Active credential resolver. In HTTP mode (default) this wraps the per-request

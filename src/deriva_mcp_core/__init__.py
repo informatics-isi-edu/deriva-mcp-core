@@ -13,11 +13,16 @@ Public API (import from deriva_mcp_core):
     get_hatrac_store(hostname)
         Returns an authenticated HatracStore for the current request context.
 
+    get_credential(hostname)
+        Returns the credential for the given hostname. Works in both HTTP and
+        stdio mode. Use this in plugins that construct higher-level DERIVA
+        clients directly:
+            DerivaML(hostname, catalog_id, credential=get_credential(hostname))
+
     get_request_credential()
-        Returns the per-request credential dict. Use when passing credentials to
-        a higher-level API that constructs its own client:
-            DerivaML(hostname, catalog_id, credential=get_request_credential())
-        Distinct from deriva.core.get_credential() which reads from local disk.
+        HTTP mode only. Returns the per-request credential dict from the
+        contextvar set by the auth verifier. Raises RuntimeError in stdio mode.
+        Prefer get_credential(hostname) for new plugin code.
 
     get_request_user_id()
         Returns the user identity (iss/sub) for the current request context.
@@ -43,6 +48,7 @@ Public API (import from deriva_mcp_core):
 from .context import (
     deriva_call,
     get_catalog,
+    get_credential,
     get_hatrac_store,
     get_request_credential,
     get_request_user_id,
@@ -52,6 +58,7 @@ from .context import (
 __all__ = [
     "deriva_call",
     "get_catalog",
+    "get_credential",
     "get_hatrac_store",
     "get_request_credential",
     "get_request_user_id",

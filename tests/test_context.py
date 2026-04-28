@@ -10,16 +10,21 @@ import contextvars
 
 import pytest
 
+import deriva_mcp_core.context as _ctx
+
 from deriva_mcp_core.context import (
     _current_credential,
     _current_user_id,
     _is_401,
+    _set_stdio_credential_fn,
     _set_token_cache,
     deriva_call,
     get_catalog,
+    get_credential,
     get_hatrac_store,
     get_request_credential,
     get_request_user_id,
+    init_hostname_map,
     set_current_credential,
     set_current_user_id,
 )
@@ -308,3 +313,65 @@ def test_deriva_call_no_op_eviction_when_no_cache():
                 raise exc
 
     _run_isolated(run)
+
+
+# ---------------------------------------------------------------------------
+# get_credential
+# ---------------------------------------------------------------------------
+
+
+def test_get_credential_http_mode_returns_credential():
+    """get_credential() returns the per-request contextvar credential in HTTP mode."""
+    def check():
+        set_current_credential(_BEARER_CRED)
+        assert get_credential("deriva.example.org") == _BEARER_CRED
+
+    _run_isolated(check)
+
+
+def test_get_credential_http_mode_raises_when_no_credential():
+    """get_credential() raises RuntimeError in HTTP mode when no credential is set."""
+    def check():
+        _current_credential.set(None)
+        with pytest.raises(RuntimeError, match="No credential in current request context"):
+            get_credential("deriva.example.org")
+
+    _run_isolated(check)
+
+
+def test_get_credential_stdio_mode_calls_fn_with_hostname():
+    """get_credential() delegates to the swapped stdio fn with the correct hostname."""
+    calls = []
+
+    def stdio_fn(hostname: str) -> dict:
+        calls.append(hostname)
+        return {"cookie": f"webauthn=token-for-{hostname}"}
+
+    original_fn = _ctx._get_credential_fn
+    try:
+        _set_stdio_credential_fn(stdio_fn)
+        result = get_credential("deriva.example.org")
+        assert result == {"cookie": "webauthn=token-for-deriva.example.org"}
+        assert calls == ["deriva.example.org"]
+    finally:
+        _ctx._get_credential_fn = original_fn
+
+
+def test_get_credential_stdio_mode_applies_hostname_remap():
+    """get_credential() passes the remapped hostname to the stdio fn."""
+    calls = []
+
+    def stdio_fn(hostname: str) -> dict:
+        calls.append(hostname)
+        return {"cookie": "webauthn=token"}
+
+    original_fn = _ctx._get_credential_fn
+    original_map = dict(_ctx._hostname_map)
+    try:
+        init_hostname_map({"localhost": "deriva"})
+        _set_stdio_credential_fn(stdio_fn)
+        get_credential("localhost")
+        assert calls == ["deriva"]
+    finally:
+        _ctx._get_credential_fn = original_fn
+        _ctx._hostname_map = original_map
