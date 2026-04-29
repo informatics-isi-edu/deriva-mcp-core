@@ -318,6 +318,18 @@ their instance to `PluginContext` (see plugin authoring guide).
 - For the `PgVectorStore` backend, the MCP server connects with a service account that
   has read/write access to the vector tables. This is separate from the per-request
   Credenza-derived credential used for DERIVA REST access.
+- **`data:` source deduplication (not yet implemented):** `data:` sources embed the
+  calling user's identity (`data:{host}:{cat}:{user_id}:...`), so each user who
+  indexes the same table gets a separate copy of the chunks. The schema hash approach
+  does not apply here because ERMrest ACLs are per-row, not per-schema -- two users
+  may see different subsets of rows from the same table, so there is no safe structural
+  equivalence class to share. For catalogs where a given table is accessible to all
+  users with identical row visibility (table-level ACLs only), deduplication is
+  theoretically safe. If this becomes a practical concern (high user count x large
+  tables), the clean extension is an optional `shared=True` flag on `RagDatasetIndexer`:
+  when set, the plugin author asserts that all permitted users see the same rows, and
+  the source name drops the user_id component so chunks are stored and returned without
+  per-user scoping. This is a plugin-API extension; no core change is needed until then.
 
 ### Configuration
 
@@ -2212,6 +2224,67 @@ tools would only be added if they handle a pattern that generic tools cannot:
 for example, a `get_dataset_summary` tool that fetches the dataset record plus
 all associated vocabulary terms in a single formatted response (the multi-join
 pattern from `FaceBaseDataBaseCrawler`).
+
+---
+
+## Deferred Enhancements
+
+### RAG data indexing: pagination and memory bounds [TODO]
+
+**Audit date:** 2026-04-28
+
+Three related problems were identified in the RAG data indexing path. None is a
+correctness bug for small tables, but all become problems at scale.
+
+#### `rag_index_table` -- hardcoded 1000-row limit
+
+`tools.py` builds the fetch URL as:
+
+```python
+url = f"/entity/{enc(schema)}:{enc(table)}?limit=1000"
+rows = await asyncio.to_thread(lambda: catalog.get(url).json())
+```
+
+The 1000-row cap was inherited from the Phase 4 design, which specified that
+`rag_index_table` fetches "via `get_entities()`". At that time `get_entities()`
+itself capped at 1000 rows, and the cap carried over. The cursor-based pagination
+(`@sort(RID)@after(rid)`) was added to `get_entities()` in Phase 5.6 but
+`rag_index_table` was never updated to use it.
+
+**Proposed fix:** drop `?limit=1000` and add a `@sort(RID)@after(rid)` cursor
+loop (same pattern as `get_entities()`) that pages through the full table. Call
+`index_table_data()` once per page. No signature change required.
+
+#### `index_table_data` -- memory-bound by API design
+
+The function signature is `rows: list[dict[str, Any]]` -- the entire result set
+must be materialized by the caller before the function is invoked. The function
+batches vector store *writes* (`_DATA_BATCH_SIZE = 50`) but not the input read.
+
+This was intentional: the function is a plugin primitive where the plugin
+controls the fetch. Changing the signature breaks existing plugins.
+
+**Proposed fix:** keep the existing `list`-based signature for backward compat.
+Fix `rag_index_table` (above) so it calls `index_table_data()` once per page
+rather than passing one massive list. Plugins doing their own small fetches are
+unaffected; plugins with large tables should page similarly.
+
+#### `_run_dataset_enricher` -- full-table fetch before processing
+
+```python
+rows = await asyncio.to_thread(lambda: catalog.get(url).json())
+```
+
+All rows are fetched in a single request before the batch-processing loop begins.
+`indexer.limit` is the only guard and is optional (None by default). For large
+enriched tables this will OOM before any chunks are written.
+
+**Proposed fix:** cursor-based pagination inside `_run_dataset_enricher` using
+the same `@sort(RID)@after(rid)` pattern. Each page is enriched, chunked, and
+upserted before the next page is fetched, bounding peak memory to one page at a
+time. `indexer.limit` can remain as an absolute row cap applied across pages.
+This is the most invasive of the three fixes -- the enricher fetch URL construction
+and the delete-once/add-batch loop structure both need to change.
 
 ---
 
