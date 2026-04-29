@@ -220,7 +220,13 @@ def resolve_user_identity(hostname: str) -> str:
     is cached per (internal) hostname so the call is made at most once per
     server lifetime per host.
 
-    Falls back to "anonymous" if resolution fails or no credential is present.
+    Falls back to "stdio" if resolution fails or no credential is present.
+    This is safe: in HTTP mode the contextvar is always set before any tool
+    runs (by the auth middleware or AnonymousPermitMiddleware), so this
+    fallback is only reachable in stdio mode. In stdio mode there is exactly
+    one user; scoping RAG data to the "stdio" identity causes no cross-user
+    exposure -- at worst the user sees no personalized results for that host.
+    "stdio" matches the fallback used by get_request_user_id() for consistency.
 
     Args:
         hostname: DERIVA server hostname. Remapping is applied internally.
@@ -265,7 +271,7 @@ def resolve_user_identity(hostname: str) -> str:
     except Exception as exc:
         logger.debug("resolve_user_identity failed for %s: %s", hostname, exc)
 
-    return "anonymous"
+    return "stdio"
 
 
 def get_request_credential() -> dict:

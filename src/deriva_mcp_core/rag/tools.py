@@ -391,18 +391,30 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
         catalog_id: str | None = None,
         doc_type: str | None = None,
     ) -> str:
-        """Semantic search across DERIVA documentation and catalog schemas.
+        """Semantic search across indexed DERIVA content.
 
-        Searches indexed documentation (deriva-py, ermrest, chaise) and catalog
-        schemas using vector similarity. When hostname and catalog_id are provided,
-        schema results are scoped to the visibility class for that catalog.
+        Searches the following source types using vector similarity:
+        - Documentation (doc_type "user-guide", "web-content"): deriva-py, ermrest,
+          chaise, and any GitHub/web sources registered via rag_add_source.
+        - Catalog schemas (doc_type "schema"): ERMrest schema for a specific catalog,
+          indexed per-user ACL visibility class via rag_index_schema.
+        - Catalog data (doc_type "catalog-data"): rows indexed by plugins via the
+          RagDatasetIndexer API, either in bulk (data:{host}:{cat}:{user}) or
+          per-RID (data:{host}:{cat}:{user}:{schema}:{table}:{rid}).
+        - Enriched content (doc_type set by the plugin): operator-indexed rows
+          produced by enricher callbacks registered via register_dataset_indexer.
+
+        When hostname and catalog_id are provided, results are scoped per source type:
+        schema results are filtered to the caller's ACL visibility class; data results
+        to the caller's own indexed rows; enriched results to the specified catalog.
 
         Args:
             query: Natural language search query.
             limit: Maximum number of results to return (default 10).
-            hostname: Restrict schema search to this DERIVA server.
-            catalog_id: Restrict schema search to this catalog.
-            doc_type: Optional filter: "user-guide", "schema", or "data".
+            hostname: Scope schema, data, and enriched results to this DERIVA server.
+            catalog_id: Scope schema, data, and enriched results to this catalog.
+            doc_type: Optional filter by document type (e.g. "user-guide", "schema",
+                "catalog-data"). Omit to search all indexed content.
         """
         try:
             where: dict = {}
@@ -431,15 +443,14 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
 
                 # Restrict data: results to this user's own per-user source(s).
                 # data: sources are named either:
-                #   data:{hostname}:{catalog_id}:{user_id}             (bulk per-user)
+                #   data:{hostname}:{catalog_id}:{user_id}  (bulk per-user)
                 # or
-                #   data:{hostname}:{catalog_id}:{user_id}:{table}:{rid} (per-RID, e.g.
-                #   deriva-ml-mcp's surgical re-index path).
-                # The accept rule is: exact-match on the bulk form, OR prefix-match
-                # on the per-RID form (own_data + ":"). The trailing colon prevents
-                # a malicious user_id like "evil-userA" from matching "data:h:c:userA"
-                # via accidental string-prefix overlap. Allowing cross-user results
-                # would expose another user's indexed rows.
+                #   data:{hostname}:{catalog_id}:{user_id}:{schema}:{table}:{rid}  (per-RID)
+                # user_id may itself contain ":" (URL-form or Globus identifiers), so the
+                # string cannot be split by ":" to extract fields. own_data encodes the full
+                # known prefix; appending ":" gives the only unambiguous structural check for
+                # the per-RID form -- it confirms the source is own_data extended with
+                # additional colon-separated components, not a coincidental prefix of it.
                 own_data = f"data:{hostname}:{catalog_id}:{user_id}"
                 own_data_per_rid_prefix = own_data + ":"
                 results = [

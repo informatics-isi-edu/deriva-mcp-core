@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from deriva_mcp_core.context import _current_user_id
 from deriva_mcp_core.plugin.api import PluginContext, _set_plugin_context
 from deriva_mcp_core.rag.store import Chunk, SearchResult, SourceStats
 
@@ -273,9 +274,9 @@ class TestRagSearch:
             ]
         )
         tools, _ = _register_rag(ctx, mock_store)
-        # Register the caller's visibility class (resolve_user_identity returns "anonymous"
+        # Register the caller's visibility class (resolve_user_identity returns "stdio"
         # in tests since no contextvar is set).
-        rag_tools._user_schema_hashes[("anonymous", "localhost", "1")] = my_hash[:16]
+        rag_tools._user_schema_hashes[("stdio", "localhost", "1")] = my_hash[:16]
         try:
             result = json.loads(await tools["rag_search"]("q", hostname="localhost", catalog_id="1"))
             sources = [r["source"] for r in result]
@@ -283,7 +284,7 @@ class TestRagSearch:
             assert other_source not in sources
             assert "deriva-py-docs:guide.md" in sources
         finally:
-            rag_tools._user_schema_hashes.pop(("anonymous", "localhost", "1"), None)
+            rag_tools._user_schema_hashes.pop(("stdio", "localhost", "1"), None)
 
     async def test_schema_results_excluded_when_hash_not_registered(
         self, ctx, mock_store
@@ -303,7 +304,7 @@ class TestRagSearch:
         )
         tools, _ = _register_rag(ctx, mock_store)
         # Ensure no hash is registered for this user/catalog
-        rag_tools._user_schema_hashes.pop(("anonymous", "localhost", "1"), None)
+        rag_tools._user_schema_hashes.pop(("stdio", "localhost", "1"), None)
         result = json.loads(await tools["rag_search"]("q", hostname="localhost", catalog_id="1"))
         sources = [r["source"] for r in result]
         assert other_source not in sources
@@ -312,12 +313,12 @@ class TestRagSearch:
     async def test_data_results_filtered_to_caller_when_scoped(self, ctx, mock_store):
         # data: chunks belonging to another user must be excluded when the search
         # is scoped to a specific hostname+catalog_id. resolve_user_identity()
-        # returns "anonymous" in tests (no contextvar set), so own source is
-        # data:localhost:1:anonymous and bob's source must be excluded.
+        # returns "stdio" in tests (no contextvar set), so own source is
+        # data:localhost:1:stdio and bob's source must be excluded.
         mock_store.set_search_results(
             [
                 SearchResult(
-                    text="own row", source="data:localhost:1:anonymous",
+                    text="own row", source="data:localhost:1:stdio",
                     doc_type="catalog-data", score=0.9, metadata={},
                 ),
                 SearchResult(
@@ -333,7 +334,7 @@ class TestRagSearch:
         tools, _ = _register_rag(ctx, mock_store)
         result = json.loads(await tools["rag_search"]("q", hostname="localhost", catalog_id="1"))
         sources = [r["source"] for r in result]
-        assert "data:localhost:1:anonymous" in sources
+        assert "data:localhost:1:stdio" in sources
         assert "data:localhost:1:bob@test.org" not in sources
         assert "deriva-py-docs:guide.md" in sources
 
@@ -343,11 +344,11 @@ class TestRagSearch:
         mock_store.set_search_results(
             [
                 SearchResult(
-                    text="own row", source="data:localhost:1:anonymous",
+                    text="own row", source="data:localhost:1:stdio",
                     doc_type="catalog-data", score=0.9, metadata={},
                 ),
                 SearchResult(
-                    text="other catalog row", source="data:localhost:2:anonymous",
+                    text="other catalog row", source="data:localhost:2:stdio",
                     doc_type="catalog-data", score=0.85, metadata={},
                 ),
             ]
@@ -355,8 +356,8 @@ class TestRagSearch:
         tools, _ = _register_rag(ctx, mock_store)
         result = json.loads(await tools["rag_search"]("q", hostname="localhost", catalog_id="1"))
         sources = [r["source"] for r in result]
-        assert "data:localhost:1:anonymous" in sources
-        assert "data:localhost:2:anonymous" not in sources
+        assert "data:localhost:1:stdio" in sources
+        assert "data:localhost:2:stdio" not in sources
 
     async def test_data_results_per_rid_source_naming_accepted(self, ctx, mock_store):
         # data: sources may be either bulk-per-user (data:host:cat:user) or
@@ -368,17 +369,17 @@ class TestRagSearch:
         mock_store.set_search_results(
             [
                 SearchResult(
-                    text="own bulk row", source="data:localhost:1:anonymous",
+                    text="own bulk row", source="data:localhost:1:stdio",
                     doc_type="catalog-data", score=0.9, metadata={},
                 ),
                 SearchResult(
                     text="own per-rid dataset row",
-                    source="data:localhost:1:anonymous:dataset:1-AAAA",
+                    source="data:localhost:1:stdio:dataset:1-AAAA",
                     doc_type="catalog-data", score=0.88, metadata={},
                 ),
                 SearchResult(
                     text="own per-rid execution row",
-                    source="data:localhost:1:anonymous:execution:2-BBBB",
+                    source="data:localhost:1:stdio:execution:2-BBBB",
                     doc_type="catalog-data", score=0.86, metadata={},
                 ),
                 SearchResult(
@@ -391,37 +392,69 @@ class TestRagSearch:
         tools, _ = _register_rag(ctx, mock_store)
         result = json.loads(await tools["rag_search"]("q", hostname="localhost", catalog_id="1"))
         sources = [r["source"] for r in result]
-        assert "data:localhost:1:anonymous" in sources
-        assert "data:localhost:1:anonymous:dataset:1-AAAA" in sources
-        assert "data:localhost:1:anonymous:execution:2-BBBB" in sources
+        assert "data:localhost:1:stdio" in sources
+        assert "data:localhost:1:stdio:dataset:1-AAAA" in sources
+        assert "data:localhost:1:stdio:execution:2-BBBB" in sources
         assert "data:localhost:1:bob@test.org:dataset:1-CCCC" not in sources
 
-    async def test_data_results_per_rid_prefix_overlap_does_not_leak(self, ctx, mock_store):
-        # Defensive: the per-RID accept rule uses (own_data + ":") as the
-        # prefix to prevent a malicious user_id like "anonymous2" from
-        # passing the filter via accidental string-prefix overlap with
-        # "anonymous". Without the trailing colon, "data:h:c:anonymous2:..."
-        # would match the prefix "data:h:c:anonymous" -- the colon
-        # eliminates that.
-        mock_store.set_search_results(
-            [
-                SearchResult(
-                    text="own row",
-                    source="data:localhost:1:anonymous:dataset:1-AAAA",
-                    doc_type="catalog-data", score=0.9, metadata={},
-                ),
-                SearchResult(
-                    text="adversary user with prefix-overlap user_id",
-                    source="data:localhost:1:anonymous2:dataset:1-EVIL",
-                    doc_type="catalog-data", score=0.85, metadata={},
-                ),
-            ]
-        )
-        tools, _ = _register_rag(ctx, mock_store)
-        result = json.loads(await tools["rag_search"]("q", hostname="localhost", catalog_id="1"))
-        sources = [r["source"] for r in result]
-        assert "data:localhost:1:anonymous:dataset:1-AAAA" in sources
-        assert "data:localhost:1:anonymous2:dataset:1-EVIL" not in sources
+    async def test_data_results_per_rid_cross_user_isolation(self, ctx, mock_store):
+        # Two authenticated users whose IDs share a string prefix ("user-a" /
+        # "user-ab") must be filtered independently. The filter uses
+        # startswith(own_data + ":") where own_data encodes the full user_id;
+        # the trailing ":" ensures we match a structural field boundary, not
+        # just any string that starts with the same prefix.
+        token = _current_user_id.set("user-a")
+        try:
+            mock_store.set_search_results(
+                [
+                    SearchResult(
+                        text="own row",
+                        source="data:localhost:1:user-a:dataset:1-AAAA",
+                        doc_type="catalog-data", score=0.9, metadata={},
+                    ),
+                    SearchResult(
+                        text="other user whose id starts with the same prefix",
+                        source="data:localhost:1:user-ab:dataset:1-BBBB",
+                        doc_type="catalog-data", score=0.85, metadata={},
+                    ),
+                ]
+            )
+            tools, _ = _register_rag(ctx, mock_store)
+            result = json.loads(await tools["rag_search"]("q", hostname="localhost", catalog_id="1"))
+            sources = [r["source"] for r in result]
+            assert "data:localhost:1:user-a:dataset:1-AAAA" in sources
+            assert "data:localhost:1:user-ab:dataset:1-BBBB" not in sources
+        finally:
+            _current_user_id.reset(token)
+
+    async def test_data_results_per_rid_user_id_with_colons(self, ctx, mock_store):
+        # user_id may itself contain ":" (e.g. Globus or OIDC URL-form identifiers).
+        # own_data encodes the full user_id string, so startswith(own_data + ":") is
+        # unambiguous regardless of colons inside the user_id component.
+        globus_uid = "https://auth.globus.org/v2/abc123"
+        token = _current_user_id.set(globus_uid)
+        try:
+            mock_store.set_search_results(
+                [
+                    SearchResult(
+                        text="own per-rid row",
+                        source=f"data:localhost:1:{globus_uid}:dataset:1-AAAA",
+                        doc_type="catalog-data", score=0.9, metadata={},
+                    ),
+                    SearchResult(
+                        text="other user row",
+                        source="data:localhost:1:stdio:dataset:1-BBBB",
+                        doc_type="catalog-data", score=0.85, metadata={},
+                    ),
+                ]
+            )
+            tools, _ = _register_rag(ctx, mock_store)
+            result = json.loads(await tools["rag_search"]("q", hostname="localhost", catalog_id="1"))
+            sources = [r["source"] for r in result]
+            assert f"data:localhost:1:{globus_uid}:dataset:1-AAAA" in sources
+            assert "data:localhost:1:stdio:dataset:1-BBBB" not in sources
+        finally:
+            _current_user_id.reset(token)
 
     async def test_data_results_unfiltered_without_hostname_catalog(self, ctx, mock_store):
         # Without hostname+catalog_id, no scoping is applied and all data: results
