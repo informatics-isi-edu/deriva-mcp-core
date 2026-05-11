@@ -41,7 +41,7 @@ from .plugin.api import PluginContext, _set_plugin_context
 from .plugin.loader import load_plugins
 from .rag import register as _register_rag
 from .tasks.manager import TaskManager, _set_task_manager
-from .telemetry import init_audit_logger
+from .telemetry import init_audit_logger, set_client_ip
 from .tools import annotation, catalog, entity, hatrac, prompts, query, resources, schema, tasks, vocabulary
 
 logger = logging.getLogger(__name__)
@@ -350,7 +350,7 @@ def create_server(
 _MISSING = object()
 
 
-def build_http_app(mcp):
+def build_http_app(mcp, cfg: Settings | None = None):
     """Return the Starlette ASGI app for HTTP transport.
 
     In normal auth-required mode this is equivalent to mcp.streamable_http_app().
@@ -362,11 +362,29 @@ def build_http_app(mcp):
     Use this instead of mcp.streamable_http_app() both in production (main()) and
     in tests so the anonymous middleware is active when needed.
     """
+    from starlette.middleware.base import BaseHTTPMiddleware
+
+    if cfg is None:
+        cfg = _default_settings
+
     app = mcp.streamable_http_app()
     verifier = getattr(mcp, "_allow_anonymous_verifier", _MISSING)
     if verifier is not _MISSING:
         from .auth.anonymous import AnonymousPermitMiddleware
         app.add_middleware(AnonymousPermitMiddleware, verifier=verifier)
+
+    # Inner middleware: capture request.client.host into the audit contextvar.
+    # Runs after ProxyHeadersMiddleware (if enabled) has already updated request.client.
+    async def _set_client_ip(request: Request, call_next):  # type: ignore[type-arg]
+        set_client_ip(request.client.host if request.client else "unknown")
+        return await call_next(request)
+
+    app.add_middleware(BaseHTTPMiddleware, dispatch=_set_client_ip)
+
+    if cfg.behind_proxy:
+        from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+        app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")  # type: ignore[arg-type]
+
     return app
 
 

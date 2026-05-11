@@ -13,6 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from .audit.logger import audit_event, init_audit_logger
+from .audit.logger import audit_event, init_audit_logger, set_client_ip
 
-__all__ = ["audit_event", "init_audit_logger"]
+__all__ = ["audit_event", "init_audit_logger", "set_client_ip"]

@@ -476,6 +476,7 @@ credential access patterns, lifecycle hooks, RAG extension, and testing.
 - [Usage Guide](docs/usage-guide.md) -- natural language prompt examples for all tool categories
 - [Plugin Authoring Guide](docs/plugin-authoring-guide.md) -- writing and testing external plugins
 - [Deployment Guide](docs/deployment-guide.md) -- Docker Compose, VM, reverse proxy, vector store backends
+- [ADR-0001: Async Architecture](docs/ADR-0001-async-architecture.md) -- why ASGI/uvicorn is non-negotiable for MCP services
 
 ---
 
