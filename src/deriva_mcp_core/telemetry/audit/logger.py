@@ -16,6 +16,7 @@
 import datetime
 import logging
 import os
+from contextvars import ContextVar
 from logging import StreamHandler
 from logging.handlers import SysLogHandler
 
@@ -25,6 +26,7 @@ from ...context import get_request_user_id_optional
 
 logger = logging.getLogger(__name__)
 svc_logger = logging.getLogger("deriva_mcp")
+_client_ip_var: ContextVar[str] = ContextVar("client_ip", default="unknown")
 
 
 def init_audit_logger(use_syslog=False):
@@ -56,6 +58,11 @@ def init_audit_logger(use_syslog=False):
     logger.propagate = False  # prevent double-emit through the root handler
 
 
+def set_client_ip(ip: str) -> None:
+    """Store the client IP for the current request in the contextvar."""
+    _client_ip_var.set(ip)
+
+
 def audit_event(event, **kwargs):
     """Emit a structured JSON audit event.
 
@@ -78,6 +85,7 @@ def audit_event(event, **kwargs):
     log_entry = {
         "event": event,
         "timestamp": datetime.datetime.now().astimezone().isoformat(),
+        "client_ip": _client_ip_var.get(),
         **extra,
         **kwargs,
     }

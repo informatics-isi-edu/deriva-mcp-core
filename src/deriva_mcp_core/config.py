@@ -155,6 +155,17 @@ class Settings(BaseSettings):
     # If unset, all authenticated users may mutate when the killswitch is off.
     mutation_required_claim: dict[str, Any] | None = None
 
+    # Set to True when this service runs behind a reverse proxy (Traefik, nginx,
+    # Apache mod_proxy) that sets X-Forwarded-For.  Enables uvicorn's
+    # ProxyHeadersMiddleware so that request.client reflects the real client IP
+    # in audit logs rather than the proxy's address.
+    #
+    # SECURITY: only enable when the service is network-isolated behind the
+    # proxy so clients cannot reach it directly and spoof X-Forwarded-For.
+    # In Docker this is enforced by the container network (no host port mapping,
+    # Traefik is the sole ingress).
+    behind_proxy: bool = False
+
     # Logging
     # Enable Python SysLogHandler for app logs (LOCAL1).  Leave False when
     # running under Docker with driver: syslog (compose handles forwarding).
