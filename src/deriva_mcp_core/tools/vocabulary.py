@@ -546,7 +546,7 @@ def register(ctx: PluginContext) -> None:
         catalog_id: str,
         schema: str,
         table: str,
-        term_name: str,
+        name: str,
         description: str,
     ) -> str:
         """Update the description of a vocabulary term.
@@ -560,7 +560,7 @@ def register(ctx: PluginContext) -> None:
             catalog_id: Catalog ID or alias.
             schema: Schema name containing the vocabulary table.
             table: Vocabulary table name.
-            term_name: Primary Name of the term to update.
+            name: Primary name of the term to update.
             description: New human-readable description.
         """
         try:
@@ -568,9 +568,9 @@ def register(ctx: PluginContext) -> None:
                 catalog = get_catalog(hostname, catalog_id)
                 pb = catalog.getPathBuilder()
                 path = pb.schemas[schema].tables[table]
-                rows = list(path.filter(path.Name == term_name).entities().fetch(limit=1))
+                rows = list(path.filter(path.Name == name).entities().fetch(limit=1))
                 if not rows:
-                    return json.dumps({"error": f"Term {term_name!r} not found in {schema}:{table}"})
+                    return json.dumps({"error": f"Term {name!r} not found in {schema}:{table}"})
                 rid = rows[0]["RID"]
                 updated = list(path.update([{"RID": rid, _DESCRIPTION: description}]))
                 term = updated[0] if updated else {}
@@ -580,7 +580,7 @@ def register(ctx: PluginContext) -> None:
                 catalog_id=catalog_id,
                 schema=schema,
                 table=table,
-                term_name=term_name,
+                term_name=name,
             )
             return json.dumps({
                 "status": "updated",
@@ -596,7 +596,7 @@ def register(ctx: PluginContext) -> None:
                 catalog_id=catalog_id,
                 schema=schema,
                 table=table,
-                term_name=term_name,
+                term_name=name,
                 error_type=type(exc).__name__,
             )
             return json.dumps({"error": fmt_exc(exc)})
