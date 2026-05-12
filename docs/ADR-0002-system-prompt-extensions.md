@@ -314,6 +314,101 @@ def system_prompt(settings, session, selected: SelectedPrompt,
 `_GUIDE_PROMPT_NAMES`, `_fetch_guides`, and the inline rule lists are
 deleted.
 
+### 5. Non-chatbot clients
+
+The strategy layer in §3 lives in the chatbot UI because it depends on the
+model tier and token budget -- both unknown to the server. Other MCP clients
+(Claude Code, Claude Desktop, ad-hoc agents) connect to deriva-mcp-core
+without a chatbot in front, and the MCP protocol gives the server no way
+to inject content into those clients' actual system prompts. The server
+exposes tools, prompts, and resources; whatever guidance reaches the agent
+must arrive through one of those three channels.
+
+The mechanism described in §1-2 already gives a non-chatbot agent most of
+what it needs:
+
+- Every extension auto-registers as a standard MCP prompt (§2), so clients
+  that surface MCP prompts as slash commands (Claude Code does) get
+  `/<server>:query_guide`, `/<server>:ml_workflow`, etc. for free.
+- The `get_guide` tool (§2) is visible to any MCP client and works
+  identically regardless of who is calling it.
+- The `deriva://prompt-extensions` resource is fetchable by any client
+  that wants to run its own selection logic over the structured manifest.
+
+What is missing is a single bootstrap entry point -- the analog of the
+chatbot UI's first-turn assembly. Without one, an agent has no way to
+learn the mandatory-core rules or the manifest of available guides until
+something goes wrong.
+
+**The `system_primer` entry point.** Core registers a built-in bootstrap
+that loads mandatory-core guidance and the available-guides manifest. It
+is exposed two ways:
+
+- As an MCP **prompt** named `system_primer`, which surfaces in clients
+  that list MCP prompts as slash commands (`/<server>:system_primer` in
+  Claude Code) for manual user invocation.
+- As an MCP **tool** of the same name, which the LLM sees in its tool
+  list every turn. The docstring is self-directing -- "Call this first
+  when working with DERIVA to load agent guidelines and the manifest of
+  available domain guides; call once per session." -- so the agent
+  invokes it without user action.
+
+Both surfaces accept the same optional arguments, `hostname` and
+`catalog_id`, which drive `applies_to` filtering. Both return the same
+body:
+
+1. The full body of every mandatory-core extension (`base_rules`,
+   `safety`, `display_rules`), concatenated in priority order, after
+   `applies_to` filtering.
+2. A one-line manifest of every other registered extension, each rendered
+   as `- <name>: <summary>` with an `applies_to` indicator when present.
+3. A short closing paragraph instructing the agent to call
+   `get_guide(name)` when it encounters an unfamiliar tool covered by an
+   advertised guide.
+
+Neither surface is registered via `system_prompt_extension`; the primer
+composes other extensions rather than contributing its own content.
+
+The expected Claude Code workflow is: the agent sees `system_primer` in
+its tool list, calls it on the first turn, and is bootstrapped. A user
+who prefers explicit control can invoke the slash-command prompt form
+instead.
+
+**Auto-discovery via server `instructions`.** The MCP `initialize`
+response includes an optional `instructions` string that the spec
+designates as a hint a client MAY add to the LLM's system prompt. Major
+clients (Claude Code, Claude Desktop) do exactly that. `create_server()`
+populates the FastMCP `instructions` field with a one-paragraph directive:
+
+> "DERIVA MCP server. Before using DERIVA tools, call the `system_primer`
+> tool to load agent guidelines and a manifest of available domain
+> guides. Use `get_guide(name)` to fetch a guide on demand."
+
+The directive reinforces the tool's self-directing docstring. Clients
+that hoist `instructions` get the primer call signaled at the system
+prompt level; clients that ignore `instructions` still see the tool in
+the list. The two together cover the realistic failure modes.
+
+Tool-ordering is advisory: an LLM may call a DERIVA tool before the
+primer if the user's first message is highly directive. Acceptable -- a
+misordered first call either returns a useful error or just works, and
+the agent typically calls the primer next.
+
+**Phrasing of mandatory content.** Mandatory-core extensions are written
+once in core and consumed by both the chatbot UI (where they land in the
+system prompt) and the `system_primer` (where they arrive as user-message
+content in the calling agent's conversation). The bodies must therefore
+be phrased neutrally -- framed as "DERIVA agent guidelines" rather than
+"you MUST" -- so they read correctly in either slot. This is a stylistic
+constraint on extension bodies; it does not affect the mechanism.
+
+**Strategy placement.** The server does not implement `BudgetedStrategy`
+or `ManifestStrategy`. The primer is functionally a manifest strategy
+with mandatory core inlined, hardcoded into its render. A non-chatbot
+client that wants a different policy reads `deriva://prompt-extensions`
+and `prompts/get` directly and assembles its own primer. Strategy choice
+is a client concern; the server provides one default rendering.
+
 ---
 
 ## Consequences
@@ -402,19 +497,30 @@ deleted.
    rule block to extensions. Run the deduplication audit during this step.
 3. **`get_guide` tool.** Register in `tools/prompts.py`; ensure its
    docstring is consistent with both strategies.
-4. **UI discovery and strategy interface.** Replace `_GUIDE_PROMPT_NAMES`
+4. **`system_primer` entry point.** Register the built-in `system_primer`
+   as both an MCP prompt (slash-command surface) and an MCP tool
+   (LLM-tool-list surface) in `tools/prompts.py`. Composes mandatory-core
+   extension bodies plus a one-line manifest of the rest; accepts
+   optional `hostname` and `catalog_id` arguments for server-side
+   `applies_to` filtering. Populate the FastMCP server `instructions`
+   field in `create_server()` with a directive to call `system_primer`
+   first. This is the entry point used by non-chatbot MCP clients (§5).
+5. **UI discovery and strategy interface.** Replace `_GUIDE_PROMPT_NAMES`
    with a `deriva://prompt-extensions` resource fetch; introduce
    `PromptInjectionStrategy`, `BudgetedStrategy`, and
    `ManifestStrategy`. `settings.prompt_strategy` selects between them.
-5. **Catalog scoping.** Implement `AppliesTo` with `catalog()` and
+6. **Catalog scoping.** Implement `AppliesTo` with `catalog()` and
    `hostname_pattern()` constructors; wire `SessionContext` to the
-   strategies.
-6. **Plugin-authoring guide update.** Document the API, the metadata schema,
-   the priority convention, and the two strategies. Provide a worked
+   strategies (chatbot UI) and to `system_primer` argument handling
+   (server-side, for non-chatbot clients).
+7. **Plugin-authoring guide update.** Document the API, the metadata
+   schema, the priority convention, the two chatbot strategies, and the
+   `system_primer` entry point for non-chatbot clients. Provide a worked
    example for a hypothetical ML plugin.
 
-Phases 1-4 are the minimum useful slice. Phase 6 is documentation, not
-code.
+Phases 1-4 are the minimum useful slice for non-chatbot clients (Claude
+Code, ad-hoc agents). Phase 5 adds the chatbot UI consumer. Phase 7 is
+documentation, not code.
 
 Note on Phase 5: cross-deployment isolation is already handled at the
 plugin-allowlist layer (`DERIVA_MCP_PLUGIN_ALLOWLIST`). FaceBase's
@@ -449,10 +555,11 @@ contribute to sessions whose connected catalog matches its scope.
   a concrete plugin contribution needs it -- low priority and accurate
   `estimated_tokens` produce functionally similar behavior under budget
   pressure. Non-breaking to add later.
-- Should `applies_to` evaluation run server-side or client-side? Current
-  preference: client-side, since `applies_to` is limited to declarative
-  forms (catalog match, hostname glob) and the UI already knows the
-  current session. Revisit only if non-declarative forms are added.
+- `applies_to` evaluation runs client-side in the chatbot UI (which
+  already knows the session) and server-side within `system_primer`
+  (driven by optional prompt arguments) for non-chatbot clients. Same
+  declarative forms either way. Revisit only if non-declarative forms
+  are added.
 - Should the manifest strategy include a token estimate per advertised
   guide so the model can weigh the cost? Possibly useful with smaller
   context windows; defer until measured.
