@@ -477,6 +477,7 @@ credential access patterns, lifecycle hooks, RAG extension, and testing.
 - [Plugin Authoring Guide](docs/plugin-authoring-guide.md) -- writing and testing external plugins
 - [Deployment Guide](docs/deployment-guide.md) -- Docker Compose, VM, reverse proxy, vector store backends
 - [ADR-0001: Async Architecture](docs/ADR-0001-async-architecture.md) -- why ASGI/uvicorn is non-negotiable for MCP services
+- [ADR-0002: Plugin-Contributed System Prompt Extensions](docs/ADR-0002-system-prompt-extensions.md) -- proposed framework for plugins to extend the chatbot's LLM system prompt (Proposed, not yet implemented)
 
 ---
 
