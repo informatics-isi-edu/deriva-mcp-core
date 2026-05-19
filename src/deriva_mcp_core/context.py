@@ -20,6 +20,8 @@ from collections.abc import Callable
 
 from deriva.core import DerivaServer, HatracStore
 
+from .config import settings as _settings
+
 logger = logging.getLogger(__name__)
 
 # Per-request credential dict. Format matches what DerivaBinding accepts:
@@ -235,7 +237,7 @@ def resolve_user_identity(hostname: str) -> str:
     if uid is not None:
         return uid
 
-    internal = _remap(hostname)
+    internal = remap_hostname(hostname)
     cached = _stdio_identity_cache.get(internal)
     if cached is not None:
         return cached
@@ -305,7 +307,7 @@ def get_credential(hostname: str) -> dict:
 
     Raises RuntimeError in HTTP mode if called outside a request context.
     """
-    return _get_credential_fn(_remap(hostname))
+    return _get_credential_fn(remap_hostname(hostname))
 
 
 # Active credential resolver. In HTTP mode (default) this wraps the per-request
@@ -317,11 +319,6 @@ def _contextvar_credential(_hostname: str) -> dict:
 
 _get_credential_fn: Callable[[str], dict] = _contextvar_credential
 
-# Hostname remap table. Maps external hostnames to internal network aliases so
-# that tool calls using a public hostname (e.g. "localhost") are routed to the
-# correct endpoint from inside the container (e.g. "deriva").
-_hostname_map: dict[str, str] = {}
-
 
 def _set_stdio_credential_fn(fn: Callable[[str], dict]) -> None:
     """Replace the credential resolver with a per-hostname disk-based lookup.
@@ -332,19 +329,25 @@ def _set_stdio_credential_fn(fn: Callable[[str], dict]) -> None:
     _get_credential_fn = fn
 
 
-def init_hostname_map(mapping: dict[str, str]) -> None:
-    """Set the hostname remap table for outbound DERIVA connections.
+def remap_hostname(hostname: str) -> str:
+    """Translate an external hostname to its internal network alias.
 
-    Called once at server startup from create_server(). Replaces the module-level
-    map so that get_catalog() and get_hatrac_store() route tool hostnames
-    through the internal network alias when running inside a Docker container.
+    Delegates to Settings.hostname_map (DERIVA_MCP_HOSTNAME_MAP). Returns
+    hostname unchanged if no mapping is configured or the hostname has no entry.
+    Plugins that open direct connections to DERIVA-adjacent services (e.g.
+    DerivaML) should call this before constructing the connection URL.
     """
-    global _hostname_map
-    _hostname_map = dict(mapping)
+    return _settings.hostname_map.get(hostname, hostname)
 
 
-def _remap(hostname: str) -> str:
-    return _hostname_map.get(hostname, hostname)
+def remap_url(url: str) -> str:
+    """Rewrite a URL's hostname using the server-level hostname map.
+
+    Delegates to Settings.remap_url(). Returns url unchanged if no mapping
+    applies. Useful for plugins that hold full endpoint URLs read from config
+    rather than bare hostnames.
+    """
+    return _settings.remap_url(url)
 
 
 # Optional callback fired whenever any tool calls get_catalog(). Registered
@@ -380,7 +383,7 @@ def get_catalog(hostname: str, catalog_id: str):
     Returns:
         An ErmrestCatalog authenticated with the current request credential.
     """
-    internal = _remap(hostname)
+    internal = remap_hostname(hostname)
     catalog = DerivaServer("https", internal,
                            credentials=_get_credential_fn(internal)).connect_ermrest(catalog_id)
     if _catalog_access_fn is not None:
@@ -407,5 +410,5 @@ def get_hatrac_store(hostname: str):
         RuntimeError: If called outside a tool or resource handler context
                       and stdio credential fn is not set.
     """
-    hostname = _remap(hostname)
+    hostname = remap_hostname(hostname)
     return HatracStore("https", hostname, credentials=_get_credential_fn(hostname))

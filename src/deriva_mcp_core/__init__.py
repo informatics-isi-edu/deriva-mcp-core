@@ -29,6 +29,19 @@ Public API (import from deriva_mcp_core):
         In HTTP mode this is derived from Credenza token introspection.
         In stdio mode returns "stdio".
 
+    remap_hostname(hostname)
+        Translate an external hostname to its internal network alias using the
+        server-level DERIVA_MCP_HOSTNAME_MAP. Returns hostname unchanged if no
+        mapping is configured. Use in plugins that open direct connections to
+        DERIVA-adjacent services (e.g. DerivaML):
+            internal = remap_hostname(hostname)
+            client = DerivaML(internal, catalog_id, credential=get_credential(internal))
+
+    remap_url(url)
+        Rewrite a full URL's hostname using DERIVA_MCP_HOSTNAME_MAP. Returns url
+        unchanged if no mapping applies. Use when your plugin holds a full endpoint
+        URL from config rather than a bare hostname.
+
     deriva_call()
         Context manager for DERIVA tool calls. Catches downstream HTTP 401
         responses, evicts the stale derived token from the cache so the next
@@ -52,6 +65,8 @@ from .context import (
     get_hatrac_store,
     get_request_credential,
     get_request_user_id,
+    remap_hostname,
+    remap_url,
     resolve_user_identity,
 )
 
@@ -62,5 +77,7 @@ __all__ = [
     "get_hatrac_store",
     "get_request_credential",
     "get_request_user_id",
+    "remap_hostname",
+    "remap_url",
     "resolve_user_identity",
 ]

@@ -47,12 +47,12 @@ from deriva.core.ermrest_model import (
 
 from . import fmt_exc
 from ..context import (
-    _remap,
     _set_catalog_access_fn,
     deriva_call,
     get_catalog,
     get_request_credential,
     get_request_user_id,
+    remap_hostname,
     resolve_user_identity,
 )
 from ..plugin.api import fire_catalog_connect
@@ -121,7 +121,7 @@ _schema_cache: dict[tuple[str, str], dict] = {}
 
 def get_cached_schema(hostname: str, catalog_id: str) -> dict | None:
     """Return the cached schema JSON for (hostname, catalog_id), or None if cold."""
-    return _schema_cache.get((_remap(hostname), catalog_id))
+    return _schema_cache.get((remap_hostname(hostname), catalog_id))
 
 
 def _fetch_schema(hostname: str, catalog_id: str, user_id: str) -> dict:
@@ -134,13 +134,13 @@ def _fetch_schema(hostname: str, catalog_id: str, user_id: str) -> dict:
     """
     # Pre-claim the slot so _on_catalog_access (triggered by get_catalog below)
     # does not schedule a redundant background _fetch_schema for the same key.
-    _connected_user_catalogs.add((_remap(hostname), catalog_id, user_id))
+    _connected_user_catalogs.add((remap_hostname(hostname), catalog_id, user_id))
     with deriva_call():
         catalog = get_catalog(hostname, catalog_id)
         # Note: deriva-py catalog.get() is a synchronous requests call.
         schema_json = catalog.get("/schema").json()
     schema_hash = _compute_schema_hash(schema_json)
-    _schema_cache[(_remap(hostname), catalog_id)] = schema_json
+    _schema_cache[(remap_hostname(hostname), catalog_id)] = schema_json
     fire_catalog_connect(hostname, catalog_id, schema_hash, schema_json)
     return schema_json
 
@@ -474,7 +474,7 @@ def register(ctx: PluginContext) -> None:
         """
         try:
             with deriva_call():
-                internal = _remap(hostname)
+                internal = remap_hostname(hostname)
                 server = DerivaServer("https", internal, credentials=get_request_credential())
                 catalog = server.create_ermrest_catalog(
                     id=catalog_id,
@@ -654,7 +654,7 @@ def register(ctx: PluginContext) -> None:
             name: Human-readable name for the destination catalog (optional).
             description: Description for the destination catalog (optional).
         """
-        internal = _remap(hostname)
+        internal = remap_hostname(hostname)
         # Capture principal at submission time for audit events inside the task.
         principal = get_request_user_id()
         # Mutable ref so the inner coroutine can read the task_id once assigned.
@@ -746,7 +746,7 @@ def register(ctx: PluginContext) -> None:
         """
         try:
             with deriva_call():
-                internal = _remap(hostname)
+                internal = remap_hostname(hostname)
                 server = DerivaServer("https", internal, credentials=get_request_credential())
                 server.create_ermrest_alias(
                     alias_name,
@@ -799,7 +799,7 @@ def register(ctx: PluginContext) -> None:
             return json.dumps({"error": "at least one of alias_target or owner must be provided"})
         try:
             with deriva_call():
-                internal = _remap(hostname)
+                internal = remap_hostname(hostname)
                 server = DerivaServer("https", internal, credentials=get_request_credential())
                 alias = server.connect_ermrest_alias(alias_name)
                 alias.update(  # type: ignore
@@ -841,7 +841,7 @@ def register(ctx: PluginContext) -> None:
         """
         try:
             with deriva_call():
-                internal = _remap(hostname)
+                internal = remap_hostname(hostname)
                 server = DerivaServer("https", internal, credentials=get_request_credential())
                 alias = server.connect_ermrest_alias(alias_name)
                 alias.delete_ermrest_alias(really=True)

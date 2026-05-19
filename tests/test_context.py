@@ -24,7 +24,6 @@ from deriva_mcp_core.context import (
     get_hatrac_store,
     get_request_credential,
     get_request_user_id,
-    init_hostname_map,
     set_current_credential,
     set_current_user_id,
 )
@@ -366,12 +365,12 @@ def test_get_credential_stdio_mode_applies_hostname_remap():
         return {"cookie": "webauthn=token"}
 
     original_fn = _ctx._get_credential_fn
-    original_map = dict(_ctx._hostname_map)
+    original_map = dict(_ctx._settings.hostname_map)
     try:
-        init_hostname_map({"localhost": "deriva"})
+        _ctx._settings.hostname_map = {"localhost": "deriva"}
         _set_stdio_credential_fn(stdio_fn)
         get_credential("localhost")
         assert calls == ["deriva"]
     finally:
         _ctx._get_credential_fn = original_fn
-        _ctx._hostname_map = original_map
+        _ctx._settings.hostname_map = original_map

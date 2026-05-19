@@ -36,7 +36,7 @@ from .auth.token_cache import DerivedTokenCache
 from .auth.verifier import CredenzaTokenVerifier
 from .config import Settings, find_config_file
 from .config import settings as _default_settings
-from .context import _set_stdio_credential_fn, _set_token_cache, init_hostname_map
+from .context import _set_stdio_credential_fn, _set_token_cache
 from .plugin.api import PluginContext, _set_plugin_context
 from .plugin.loader import load_plugins
 from .rag import register as _register_rag
@@ -221,7 +221,6 @@ def create_server(
 
     if cfg.hostname_map:
         logger.info("Hostname map active: %s", cfg.hostname_map)
-        init_hostname_map(cfg.hostname_map)
 
     init_audit_logger(use_syslog=cfg.audit_use_syslog)
 
