@@ -1719,6 +1719,24 @@ is optional or unavailable:
   `TaskManager` requires no changes.
 - 18 new tests in `tests/test_anonymous.py`; full suite: 439 tests, 88% coverage.
 
+**Anonymous mode deprecation [PLANNED -- see Phase 8]**
+
+`DERIVA_MCP_ALLOW_ANONYMOUS=true` (mixed mode with a verifier) violates RFC 9728 and
+the MCP authorization spec: an unauthenticated request to a resource server that supports
+OAuth MUST receive a `401 Unauthorized` with a `WWW-Authenticate: Bearer resource_metadata="..."`
+challenge so the client can discover the authorization server and initiate the OAuth flow.
+With `AnonymousPermitMiddleware`, that challenge is never issued -- the client gets HTTP 200
+and has no signal that auth is available, so it stays anonymous indefinitely.
+
+The `deriva-docker` default deployment has already been updated to
+`DERIVA_MCP_ALLOW_ANONYMOUS=false`. The resolution is to replace tokenless anonymous
+MCP access with service-account `client_credentials` authentication in the mcp-ui
+backend (see mcp-ui workplan Phase 11). Once that is done, `allow_anonymous` mode and
+`AnonymousPermitMiddleware` can be removed entirely.
+
+The anonymous-only sub-mode (no `credenza_url`) is not affected -- it is correctly
+RFC-compliant since there is no OAuth server to challenge clients with.
+
 **RAG ACL isolation and stdio identity [DONE -- 2026-04-02]**
 
 Fixed a security gap where schema indexing claimed per-ACL-view isolation but
@@ -2162,6 +2180,37 @@ decisions. Absence is silently ignored.
 - Do not add `correlation_id` to non-audit log lines (it would be noise in the
   application log). Audit events only.
 - No new config flags needed -- the feature is passive on the mcp-core side.
+
+---
+
+## Phase 8 -- Anonymous Mode Removal [PLANNED]
+
+**Status:** Not started. Ships as part of mcp-ui Phase 11 -- a single coordinated PR
+across mcp-ui, mcp-core, and deriva-docker. See mcp-ui workplan Phase 11 for the
+full design.
+
+### Summary
+
+Once mcp-ui anonymous sessions use `client_credentials` service-account tokens
+instead of calling the MCP server tokenless, `DERIVA_MCP_ALLOW_ANONYMOUS` and
+`AnonymousPermitMiddleware` are no longer needed and are removed in the same PR.
+
+### Changes
+
+- Delete `auth/anonymous.py` and `tests/test_anonymous.py`.
+- `server.py`: remove `allow_anonymous` branch, `AnonymousPermitMiddleware` import,
+  and `_allow_anonymous_verifier` / `_anonymous_resource_metadata_url` stash pattern.
+  `build_http_app()` simplifies to just the client-IP and optional proxy-headers
+  middleware.
+- `config.py`: remove `allow_anonymous: bool` field from `Settings`.
+- Remove the "Request Auth Flow (HTTP, allow-anonymous mode)" section from this
+  workplan and the README.
+
+### What is preserved
+
+The anonymous-only sub-mode (no `credenza_url` configured) is a separate code path
+(no verifier constructed, no middleware) and is not affected. Deployments with no
+Credenza continue to work by simply not setting `DERIVA_MCP_CREDENZA_URL`.
 
 ---
 
