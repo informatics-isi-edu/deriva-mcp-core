@@ -1485,6 +1485,47 @@ class TestVocabularyTools:
         assert "error" in result
         assert mock_audit.call_args[0][0] == "vocabulary_create_vocabulary_failed"
 
+    async def test_create_vocabulary_uses_canonical_pseudo_types(
+        self, ctx, mock_catalog, mock_model
+    ):
+        """ID and URI columns must use ermrest_curie / ermrest_uri pseudo-types.
+
+        Regression for B15 (surfaced by e2e Phase 6). The original
+        implementation defined URI/ID as plain text with nullok=False
+        and no default. add_term relies on the catalog to fill in ID
+        and URI from the RID via the pseudo-type defaults, so plain
+        text + NOT NULL produced a non-functional table that rejected
+        every add_term call with a NOT NULL violation on URI. Fix
+        routes through Table.define_vocabulary, which uses the
+        canonical types with the right templates.
+        """
+        model, _, _ = mock_model
+        mock_new_table = MagicMock()
+        mock_new_table.name = "Species"
+        mock_new_table.columns = []
+        captured: dict = {}
+
+        def capture_create_table(table_def):
+            captured.update(table_def)
+            return mock_new_table
+
+        model.schemas.__getitem__.return_value.create_table.side_effect = (
+            capture_create_table
+        )
+        mock_catalog.getCatalogModel.return_value = model
+        tools = self._register(ctx)
+        with self._patch_server(mock_catalog), patch(
+            "deriva_mcp_core.tools.vocabulary.audit_event"
+        ):
+            await tools["create_vocabulary"]("h", "1", "vocab", "Species", "comment")
+
+        cols = {c["name"]: c for c in captured["column_definitions"]}
+        assert cols["URI"]["type"]["typename"] == "ermrest_uri"
+        assert cols["ID"]["type"]["typename"] == "ermrest_curie"
+        assert cols["URI"]["default"] == "/id/{RID}"
+        assert "{RID}" in cols["ID"]["default"]
+        assert cols["ID"]["default"].startswith("vocab:")
+
     # -- add_synonym --
 
     async def test_add_synonym_synonyms_invalid_json_string(self, ctx, mock_catalog):

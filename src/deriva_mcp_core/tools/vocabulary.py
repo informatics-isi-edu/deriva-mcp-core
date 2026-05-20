@@ -20,7 +20,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from deriva.core.ermrest_model import Column, Key, Table, builtin_types
+from deriva.core.ermrest_model import Table
 
 from . import fmt_exc
 from ..context import deriva_call, get_catalog
@@ -340,10 +340,25 @@ def register(ctx: PluginContext) -> None:
     ) -> str:
         """Create a new vocabulary table in the specified schema.
 
-        Creates a table with the standard DERIVA vocabulary column set:
-        Name (text, unique), URI (text, unique), Synonyms (json),
-        Description (markdown), ID (text, unique). System columns
-        (RID, RCT, RCB, RMT, RMB) are added automatically by ERMrest.
+        Uses deriva-py's ``Table.define_vocabulary`` so the resulting
+        table follows the canonical DERIVA vocabulary schema:
+
+        - ``ID``: ``ermrest_curie``, NOT NULL, default
+          ``"{schema}:{RID}"`` -- server-side-generated from RID.
+        - ``URI``: ``ermrest_uri``, NOT NULL, default ``"/id/{RID}"``
+          -- server-side-generated from RID.
+        - ``Name``: text, NOT NULL, unique.
+        - ``Description``: markdown, NOT NULL.
+        - ``Synonyms``: ``text[]``.
+
+        The pseudo-types ``ermrest_curie`` / ``ermrest_uri`` are the
+        load-bearing part: subsequent ``add_term`` calls submit only
+        ``Name`` (and optionally ``Description`` / ``Synonyms``) and
+        rely on the catalog to fill in ``ID`` and ``URI`` from the
+        ``RID`` via these defaults. Using plain ``text`` here -- with
+        no default -- produced a non-functional table that rejected
+        every ``add_term`` insert with a NOT NULL violation on
+        ``URI``.
 
         Args:
             hostname: Hostname of the DERIVA server.
@@ -352,25 +367,9 @@ def register(ctx: PluginContext) -> None:
             vocabulary_name: Name for the new vocabulary table.
             comment: Optional human-readable description of the vocabulary.
         """
-        table_def = Table.define(
+        table_def = Table.define_vocabulary(
             vocabulary_name,
-            column_defs=[
-                Column.define(_NAME, builtin_types.text, nullok=False,
-                              comment="Primary display name of the term"),
-                Column.define(_URI, builtin_types.text, nullok=False,
-                              comment="Unique URI identifier for the term"),
-                Column.define(_SYNONYMS, builtin_types.json, nullok=True,
-                              comment="Alternative names for the term"),
-                Column.define(_DESCRIPTION, builtin_types.markdown, nullok=True,
-                              comment="Human-readable description of the term"),
-                Column.define(_ID, builtin_types.text, nullok=False,
-                              comment="Short text identifier for the term"),
-            ],
-            key_defs=[
-                Key.define([_NAME]),
-                Key.define([_URI]),
-                Key.define([_ID]),
-            ],
+            curie_template=f"{schema}:{{RID}}",
             comment=comment,
         )
         try:
