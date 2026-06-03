@@ -43,9 +43,24 @@ def register(ctx: PluginContext) -> None:
             hostname: DERIVA server hostname.
             catalog_id: Catalog ID, alias, or ID@snaptime (Crockford base32 --
                 call resolve_snaptime to convert a date).
-            path: ERMREST path relative to /attribute/ (e.g. "isa:Dataset/Status=released").
-                Do NOT embed @sort/@after or trailing /* in the path.
-            attributes: Columns to return. Omit for all columns.
+            path: ERMREST path relative to /attribute/. Do NOT embed @sort/@after
+                or trailing /* in the path.
+
+                Simple filter example: "isa:Dataset/Status=released"
+
+                Multi-table join with aliases: assign an alias to each table you
+                want to project from using "alias:=schema:Table" syntax placed
+                directly on that table in the path. The alias binds to the table
+                it is written on, NOT to the first table in the path.
+
+                Example projecting columns from two joined tables:
+                  "isa:Study/s:=isa:Subject/d:=isa:Diagnosis/Status=Active"
+                Here "s:" refers to Subject and "d:" refers to Diagnosis.
+
+            attributes: Columns to return. Omit for all columns. For multi-table
+                paths with aliases, prefix each column with its alias to specify
+                which table it comes from, e.g. ["s:RID", "s:Age", "d:Diagnosis_Tag"].
+                Unprefixed column names are resolved against the rightmost table.
             limit: Max rows (page size for cursor-based pagination).
             after_rid: RID of last row from previous page to advance cursor.
 
