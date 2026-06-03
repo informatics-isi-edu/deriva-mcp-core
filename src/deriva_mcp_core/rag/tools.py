@@ -408,13 +408,28 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
         schema results are filtered to the caller's ACL visibility class; data results
         to the caller's own indexed rows; enriched results to the specified catalog.
 
+        IMPORTANT: When the user asks a question that may involve both catalog
+        data AND documentation or web content (e.g. "what datasets are available",
+        "tell me about X", "how do I access Y"), always run at least two searches:
+        (1) a broad search with no doc_type filter to retrieve the most relevant
+        results overall, then (2) follow-up searches with doc_type="web-content",
+        doc_type="user-guide", and doc_type="publication" using the same query. Merge the
+        results before responding. Enriched catalog records frequently outscore
+        web pages in broad searches, causing web content to be completely absent
+        from results even when it is highly relevant. The follow-up filtered search
+        guarantees web/doc sources are represented. When presenting merged results,
+        include the relevance score for each source so the user can judge relative
+        confidence. Web/doc results at moderate scores (0.4+) are worth surfacing
+        since they are structurally outranked by catalog data even when directly relevant.
+
         Args:
             query: Natural language search query.
             limit: Maximum number of results to return (default 10).
             hostname: Scope schema, data, and enriched results to this DERIVA server.
             catalog_id: Scope schema, data, and enriched results to this catalog.
-            doc_type: Optional filter by document type (e.g. "user-guide", "schema",
-                "catalog-data"). Omit to search all indexed content.
+            doc_type: Optional filter by document type. Known values: "user-guide",
+                "web-content", "publication", "schema", "catalog-data". Omit to
+                search all indexed content.
         """
         try:
             where: dict = {}
