@@ -45,7 +45,6 @@ import asyncio
 import functools
 import json
 import logging
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -475,25 +474,12 @@ class PluginContext:
 # ------------------------------------------------------------------
 
 
-_HOOK_SLOW_THRESHOLD_S = 0.5  # hooks slower than this likely contain blocking sync calls
-
 async def _safe_call(fn: Callable[..., Any], *args: Any) -> None:
     """Call an async hook, logging and suppressing any exception."""
-    name = getattr(fn, "__name__", repr(fn))
-    t0 = time.monotonic()
     try:
         await fn(*args)
     except Exception:
-        logger.exception("Exception in plugin lifecycle hook %r", name)
-    finally:
-        elapsed = time.monotonic() - t0
-        if elapsed >= _HOOK_SLOW_THRESHOLD_S:
-            logger.warning(
-                "Plugin lifecycle hook %r took %.2fs -- this strongly suggests "
-                "synchronous blocking calls inside an async hook. Wrap all blocking "
-                "I/O in asyncio.to_thread() to avoid stalling the event loop.",
-                name, elapsed,
-            )
+        logger.exception("Exception in plugin lifecycle hook %r", getattr(fn, "__name__", fn))
 
 
 def _set_plugin_context(ctx: PluginContext | None) -> None:
