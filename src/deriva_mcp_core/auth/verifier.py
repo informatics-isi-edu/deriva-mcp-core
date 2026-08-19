@@ -25,6 +25,7 @@ from .introspect_cache import IntrospectionCache
 from .token_cache import DerivedTokenCache
 from ..config import Settings
 from ..context import (
+    set_admin_allowed,
     set_current_bearer_token,
     set_current_credential,
     set_current_user_id,
@@ -136,6 +137,15 @@ class CredenzaTokenVerifier:
             set_mutation_allowed(allowed)
         else:
             set_mutation_allowed(True)
+
+        # Step 6: evaluate admin claim. Unlike mutation, this fails closed --
+        # an unconfigured admin_required_claim denies admin-only tools rather
+        # than permitting them, since there is no prior behavior to preserve.
+        admin_claim_spec = self._settings.admin_required_claim
+        if admin_claim_spec is not None:
+            set_admin_allowed(_satisfies_claim_spec(result.payload, admin_claim_spec))
+        else:
+            set_admin_allowed(False)
 
         display = result.payload.get("email") or result.payload.get("preferred_username") or result.sub
         logger.debug("Authenticated: principal=%s display=%s aud=%s", principal, display, result.aud)

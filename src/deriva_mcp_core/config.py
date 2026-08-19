@@ -155,6 +155,17 @@ class Settings(BaseSettings):
     # If unset, all authenticated users may mutate when the killswitch is off.
     mutation_required_claim: dict[str, Any] | None = None
 
+    # Admin claim requirement. If set, authenticated users must have a matching
+    # claim in their token introspection payload to execute admin-only tools
+    # (e.g. RAG source management and full reindex triggers). Same claim_spec
+    # format as mutation_required_claim.
+    # Example: DERIVA_MCP_ADMIN_REQUIRED_CLAIM={"groups": ["deriva-mcp-admin"]}
+    # SECURITY: unlike mutation_required_claim, this fails CLOSED -- if unset,
+    # admin-only tools are denied to all HTTP-mode callers until an operator
+    # configures this claim. Stdio mode (single local user, no token) is
+    # unaffected and always permits admin-only tools.
+    admin_required_claim: dict[str, Any] | None = None
+
     # Set to True when this service runs behind a reverse proxy (Traefik, nginx,
     # Apache mod_proxy) that sets X-Forwarded-For.  Enables uvicorn's
     # ProxyHeadersMiddleware so that request.client reflects the real client IP

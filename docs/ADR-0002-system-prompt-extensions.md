@@ -532,7 +532,52 @@ contribute to sessions whose connected catalog matches its scope.
 
 ---
 
+## Stopgap: tool prefix filtering (pre-ADR-0002)
+
+While this ADR is unimplemented, a lightweight stopgap addresses the immediate
+performance problem caused by large plugin tool counts (observed: 119 tools from
+`deriva-ml-mcp` alone, causing 60-90 second first-turn latency). This is a
+**chatbot client concern** -- the MCP server exposes all registered tools
+unconditionally to any MCP client; the latency problem arises because the chatbot
+includes all tool schemas in the LLM context on every turn, inflating token count
+regardless of whether those tools are relevant to the query.
+
+The stopgap is a query-intent-based tool prefix filter in `deriva_mcp_ui/chat.py`,
+configurable via two env vars:
+
+- `DERIVA_CHATBOT_DEFERRED_TOOL_PREFIXES` -- comma-separated tool name prefixes
+  to exclude from the LLM context by default (e.g. `deriva_ml_`).
+- `DERIVA_CHATBOT_DEFERRED_TOOL_KEYWORDS` -- comma-separated query keywords that
+  re-include deferred tools for a given turn (e.g. `dataset,workflow,feature,model`).
+
+This is intentionally crude. It has no plugin API, no `applies_to` semantics,
+and no catalog scoping. When ADR-0002 Phase 6 lands with tool-side `applies_to`
+support (see below), the stopgap env vars should be removed and operators should
+migrate to declarative tool scoping declared in the plugin.
+
+---
+
 ## Open questions
+
+- **Tool-side `applies_to` (required, not optional).** The `applies_to` scoping
+  mechanism designed for system prompt extensions must also apply to tools.
+  This is again a **chatbot client concern**: the MCP server continues to expose
+  all tools to all MCP clients; `applies_to` on a tool registration is a hint
+  the chatbot reads from the manifest to decide which tool schemas to include in
+  the LLM context on a given turn. Without it, plugins like `deriva-ml-mcp`
+  contribute their full tool list to every LLM call regardless of whether the
+  connected catalog needs them, causing severe token overhead (observed: 119
+  tools, 60-90s first-turn latency). Tool-side `applies_to` is therefore a hard
+  requirement for Phase 6, not a future enhancement. The `ctx.tool()` registration
+  API must accept the same `AppliesTo` forms as `ctx.system_prompt_extension()`:
+
+  ```python
+  ctx.tool(mutates=False, applies_to=AppliesTo.hostname_pattern("*.eye-ai.org"))
+  ```
+
+  The chatbot UI applies the same `applies_to` filter to the tool list before
+  each LLM call that it applies to prompt extension selection. The stopgap prefix
+  filter (see above) is retired once this lands.
 
 - **Tool-side guide linkage.** The manifest strategy relies on the LLM
   reading each extension's `summary` to decide when to fetch the body.

@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from deriva_mcp_core.context import set_mutation_allowed
+from deriva_mcp_core.context import set_admin_allowed, set_mutation_allowed
 from deriva_mcp_core.plugin.api import (
     PluginContext,
     RagDatasetIndexerDeclaration,
@@ -376,6 +376,75 @@ async def test_no_claim_config_no_guard_overhead(mcp):
 
     result = await write_tool()
     assert result == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Admin claim guard
+# ---------------------------------------------------------------------------
+
+
+async def test_admin_allowed_when_contextvar_true(ctx):
+    set_admin_allowed(True)
+
+    @ctx.tool(mutates=False, admin=True)
+    async def admin_tool():
+        return "ok"
+
+    result = await admin_tool()
+    assert result == "ok"
+
+
+async def test_admin_denied_when_contextvar_false(ctx):
+    set_admin_allowed(False)
+
+    @ctx.tool(mutates=False, admin=True)
+    async def admin_tool():
+        return "ok"
+
+    result = await admin_tool()
+    assert "admin" in result
+
+
+async def test_admin_guard_does_not_block_non_admin_tools(ctx):
+    set_admin_allowed(False)
+
+    @ctx.tool(mutates=False, admin=False)
+    async def read_tool():
+        return "data"
+
+    result = await read_tool()
+    assert result == "data"
+
+
+async def test_admin_guard_independent_of_mutation_claim(mcp):
+    """admin=True on a mutates=False tool is gated even with no mutation config at all."""
+    ctx = PluginContext(mcp, disable_mutating_tools=False, mutation_required_claim=None)
+    set_admin_allowed(False)
+
+    @ctx.tool(mutates=False, admin=True)
+    async def admin_tool():
+        return "ok"
+
+    result = await admin_tool()
+    assert "admin" in result
+
+
+async def test_mutation_and_admin_guards_both_apply(mcp):
+    """A tool can be both mutates=True and admin=True; either guard can deny it."""
+    ctx = PluginContext(
+        mcp,
+        disable_mutating_tools=False,
+        mutation_required_claim={"groups": ["mcp-mutators"]},
+    )
+    set_mutation_allowed(True)
+    set_admin_allowed(False)  # mutation claim passes, admin claim does not
+
+    @ctx.tool(mutates=True, admin=True)
+    async def write_admin_tool():
+        return "ok"
+
+    result = await write_admin_tool()
+    assert "admin" in result
 
 
 def test_allowlist_skipped_plugin_logs_warning(ctx, caplog):

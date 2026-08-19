@@ -16,7 +16,6 @@ with per-request OAuth authentication via [Credenza](https://github.com/informat
     - [HTTP (production)](#http-production)
 - [Configuration Reference](#configuration-reference)
 - [Built-in Tools](#built-in-tools)
-- [RAG Subsystem](#rag-subsystem)
 - [Safety Controls](#safety-controls)
     - [Anonymous Access](#anonymous-access)
 - [Plugin Framework](#plugin-framework)
@@ -140,6 +139,7 @@ and the [Deployment Guide](docs/deployment-guide.md).
 | `DERIVA_MCP_DISABLE_MUTATING_TOOLS`       | `true`                        | When `true`, all tools registered as mutating return an error without executing                                                            |
 | `DERIVA_MCP_PLUGIN_ALLOWLIST`             | *(unset -- allow all)*        | Comma-separated list of plugin entry point names to load; empty string disables all external plugins                                       |
 | `DERIVA_MCP_MUTATION_REQUIRED_CLAIM`      | *(unset)*                     | JSON claim spec that must match the token introspection payload before mutations are permitted (e.g. `{"groups": ["deriva-mcp-mutator"]}`) |
+| `DERIVA_MCP_ADMIN_REQUIRED_CLAIM`         | *(unset)*                     | JSON claim spec required for admin-only tools. **Fails closed when unset**, unlike the mutation claim (see below)                          |
 | `DERIVA_MCP_TOKEN_CACHE_BUFFER_SECONDS`   | `60`                          | Re-exchange derived tokens this many seconds before they expire                                                                            |
 | `DERIVA_MCP_INTROSPECT_CACHE_TTL_SECONDS` | `60`                          | How long to cache token introspection results                                                                                              |
 | `DERIVA_MCP_AUDIT_LOGFILE_PATH`           | `deriva-mcp-audit.log`        | Audit log file path (used when syslog is off)                                                                                              |
@@ -164,173 +164,32 @@ and the [Deployment Guide](docs/deployment-guide.md).
 
 ## Built-in Tools
 
-Mutating tools (`*` below) are disabled by default
-(`DERIVA_MCP_DISABLE_MUTATING_TOOLS=true`). Set it to `false` to enable them.
+Schema introspection, entity CRUD, queries, Hatrac, catalog administration,
+annotations, schema DDL, vocabulary, and background-task tools are documented in
+the [Usage Guide](docs/usage-guide.md). Mutating tools among them are disabled by
+default (`DERIVA_MCP_DISABLE_MUTATING_TOOLS=true`); set it to `false` to enable them.
 
-### Schema introspection
-
-| Tool                         | Description                                                        |
-|------------------------------|--------------------------------------------------------------------|
-| `get_catalog_info`           | Catalog metadata and list of schemas                               |
-| `list_schemas`               | Schema names and comments                                          |
-| `get_schema`                 | Tables, columns, keys, and foreign keys for a schema               |
-| `get_table`                  | Full definition for one table                                      |
-| `resolve_snaptime`           | Convert a snapshot identifier or timestamp to a canonical snaptime |
-| `get_catalog_history_bounds` | Earliest and latest snapshot timestamps                            |
-
-### Entity CRUD
-
-| Tool                | Description                                                                            |
-|---------------------|----------------------------------------------------------------------------------------|
-| `get_entities`      | Fetch rows with optional filters, cursor pagination (`after_rid`), and preflight count |
-| `insert_entities` * | Insert rows; returns inserted records                                                  |
-| `update_entities` * | Sparse update (only columns present in the payload are written)                        |
-| `delete_entities` * | Delete rows matching filters (filters are required)                                    |
-
-### Queries
-
-| Tool              | Description                                                      |
-|-------------------|------------------------------------------------------------------|
-| `query_attribute` | ERMrest attribute query on a caller-supplied path expression     |
-| `count_table`     | Row count with optional equality filters                         |
-| `query_aggregate` | ERMrest aggregate query (group-by, custom aggregate expressions) |
-
-### Hatrac object store
-
-| Tool                  | Description                                |
-|-----------------------|--------------------------------------------|
-| `list_namespace`      | List objects in a Hatrac namespace         |
-| `get_object_metadata` | Object metadata (size, checksums, version) |
-| `create_namespace` *  | Create a Hatrac namespace                  |
-
-### Catalog administration
-
-| Tool                     | Description                                               |
-|--------------------------|-----------------------------------------------------------|
-| `create_catalog` *       | Create a new empty ERMrest catalog                        |
-| `delete_catalog` *       | Permanently delete a catalog                              |
-| `clone_catalog` *        | Clone a catalog (synchronous)                             |
-| `clone_catalog_async` *  | Clone a catalog as a background task; returns a `task_id` |
-| `create_catalog_alias` * | Create an ERMrest catalog alias                           |
-| `update_catalog_alias` * | Update alias target or owner                              |
-| `delete_catalog_alias` * | Delete an alias (not the underlying catalog)              |
-| `cite`                   | Generate a permanent citation URL for a catalog entity    |
-
-### Annotations
-
-| Tool                                | Description                                               |
-|-------------------------------------|-----------------------------------------------------------|
-| `get_table_annotations`             | All annotations on a table                                |
-| `get_column_annotations`            | All annotations on a column                               |
-| `list_foreign_keys`                 | Foreign key definitions for a table                       |
-| `get_handlebars_template_variables` | Variables available in Handlebars row-name patterns       |
-| `get_table_sample_data`             | Fetch sample rows for template testing                    |
-| `preview_handlebars_template`       | Render a Handlebars template against provided data        |
-| `validate_template_syntax`          | Validate Handlebars template syntax                       |
-| `set_display_annotation` *          | Set an arbitrary display annotation tag                   |
-| `set_table_display_name` *          | Set the Chaise display name for a table                   |
-| `set_row_name_pattern` *            | Set the Handlebars row-name template                      |
-| `set_column_display_name` *         | Set the Chaise display name for a column                  |
-| `set_visible_columns` *             | Replace the visible-columns annotation for a context      |
-| `add_visible_column` *              | Add one column to visible-columns                         |
-| `remove_visible_column` *           | Remove one column from visible-columns                    |
-| `set_visible_foreign_keys` *        | Replace the visible-foreign-keys annotation for a context |
-| `add_visible_foreign_key` *         | Add one foreign key to visible-foreign-keys               |
-| `remove_visible_foreign_key` *      | Remove one foreign key from visible-foreign-keys          |
-| `reorder_visible_columns` *         | Reorder entries in visible-columns                        |
-| `reorder_visible_foreign_keys` *    | Reorder entries in visible-foreign-keys                   |
-| `set_table_display` *               | Set the full table-level display annotation               |
-| `set_column_display` *              | Set the full column-level display annotation              |
-| `apply_navbar_annotations` *        | Set catalog-level Chaise navbar and display annotations   |
-
-### Schema DDL
-
-| Tool                       | Description                                         |
-|----------------------------|-----------------------------------------------------|
-| `create_table` *           | Create a table with columns, keys, and foreign keys |
-| `add_column` *             | Add a column to an existing table                   |
-| `set_table_description` *  | Set a table's comment                               |
-| `set_column_description` * | Set a column's comment                              |
-| `set_column_nullok` *      | Change a column's nullability                       |
-
-### Vocabulary
-
-| Tool                        | Description                                     |
-|-----------------------------|-------------------------------------------------|
-| `list_vocabulary_terms`     | All terms in a vocabulary table                 |
-| `lookup_term`               | Find a term by name or synonym                  |
-| `create_vocabulary` *       | Create a vocabulary table with standard columns |
-| `add_term` *                | Add a term (ID and URI auto-generated)          |
-| `update_term` *             | Update term name, description, or synonyms      |
-| `update_term_description` * | Update only a term's description                |
-| `add_synonym` *             | Append a synonym to a term                      |
-| `remove_synonym` *          | Remove a synonym from a term                    |
-| `delete_term` *             | Delete a term                                   |
-
-### Background tasks
-
-| Tool              | Description                                                            |
-|-------------------|------------------------------------------------------------------------|
-| `get_task_status` | Status, progress, result, or error for a background task               |
-| `list_tasks`      | All background tasks for the current user, with optional status filter |
-| `cancel_task`     | Request cancellation of a running task                                 |
-
----
-
-## RAG Subsystem
-
-The RAG subsystem provides semantic search over DERIVA documentation and catalog schemas.
-It is disabled by default and requires the `rag` optional dependency group.
-
-Enable it:
-
-```ini
-DERIVA_MCP_RAG_ENABLED = true
-```
-
-On startup (when `DERIVA_MCP_RAG_AUTO_UPDATE=true`), the server incrementally crawls the
-built-in documentation sources (deriva-py, ermrest, chaise) and indexes any changed files.
-Catalog schemas are indexed automatically when a tool first accesses a catalog
-(via the `on_catalog_connect` lifecycle hook).
-
-### Vector backends
-
-**ChromaDB (default)** -- embedded, zero additional services:
-
-```ini
-DERIVA_MCP_RAG_VECTOR_BACKEND = chroma
-DERIVA_MCP_RAG_CHROMA_DIR = ~/.deriva-mcp/chroma
-```
-
-For multi-instance deployments, point all instances at a shared ChromaDB server:
-
-```ini
-DERIVA_MCP_RAG_CHROMA_URL = http://chroma:8000
-```
-
-**pgvector** -- recommended for production multi-instance deployments:
-
-```ini
-DERIVA_MCP_RAG_VECTOR_BACKEND = pgvector
-DERIVA_MCP_RAG_PG_DSN = postgresql://user:pass@db:5432/deriva_mcp
-```
-
-Requires the `pgvector` PostgreSQL extension. The server creates the required table and
-index automatically on first startup.
+The RAG tools are listed here because their admin gating is configured separately
+from the mutation kill switch:
 
 ### RAG tools
 
-| Tool                    | Description                                                    |
-|-------------------------|----------------------------------------------------------------|
-| `rag_search`            | Semantic search across documentation and catalog schemas       |
-| `rag_status`            | Per-source chunk counts, timestamps, and indexed schema hashes |
-| `rag_update_docs`       | Incremental documentation update (SHA delta, runs inline)      |
-| `rag_update_docs_async` | Same as above, submitted as a background task                  |
-| `rag_index_schema`      | Manually trigger schema reindex for a catalog                  |
-| `rag_index_table`       | Index rows from a specific table into the vector store         |
-| `rag_ingest`            | Force a full re-crawl of one or all documentation sources      |
-| `rag_add_source`        | Register a new documentation source at runtime (persisted)     |
-| `rag_remove_source`     | Remove a runtime-added documentation source                    |
+| Tool                    | Description                                                    | Admin? |
+|-------------------------|----------------------------------------------------------------|--------|
+| `rag_search`            | Semantic search across documentation and catalog schemas       |        |
+| `rag_status`            | Per-source chunk counts, timestamps, and indexed schema hashes |        |
+| `rag_update_docs`       | Incremental documentation update (SHA delta, runs inline)      | Yes    |
+| `rag_update_docs_async` | Same as above, submitted as a background task                  | Yes    |
+| `rag_index_schema`      | Manually trigger schema reindex for a catalog                  |        |
+| `rag_index_table`       | Index rows from a specific table into the vector store         |        |
+| `rag_ingest`            | Force a full re-crawl of one or all documentation sources      | Yes    |
+| `rag_ingest_datasets`   | Force re-enrichment of registered dataset indexers             | Yes    |
+| `rag_add_source`        | Register a new documentation source at runtime (persisted)     | Yes    |
+| `rag_remove_source`     | Remove a runtime-added documentation source                    | Yes    |
+| `rag_import_chunks`     | Bulk-import pre-built chunks from a local JSON file            | Yes    |
+
+"Admin?" tools require `DERIVA_MCP_ADMIN_REQUIRED_CLAIM` -- see
+[Admin-only tool claim gating](#admin-only-tool-claim-gating).
 
 ---
 
@@ -345,7 +204,9 @@ disabled and an info message when they are enabled, so the active state is alway
 in the logs.
 
 RAG tools write to the local vector store, not the DERIVA catalog, and are not affected
-by this setting.
+by this setting. The subset of RAG tools that affect shared/global server state (full
+re-crawls, source registration, bulk chunk import) are instead gated by the separate
+admin claim below.
 
 ### Plugin allowlist
 
@@ -420,6 +281,28 @@ List values use OR semantics (any match is sufficient). Multiple keys use AND se
 (all must match). Users who fail the check receive an error response and a
 `mutation_claim_denied` audit event. The kill switch takes precedence when both
 controls are active.
+
+### Admin-only tool claim gating
+
+Some tools are registered with `admin=True` instead of (or alongside) `mutates=True` --
+tools that affect shared/global server state rather than the caller's own scoped data.
+Currently this covers the RAG tools that trigger full re-crawls or persist/remove
+documentation sources: `rag_ingest`, `rag_ingest_datasets`, `rag_update_docs`,
+`rag_update_docs_async`, `rag_add_source`, `rag_remove_source`, `rag_import_chunks`.
+`rag_search`, `rag_status`, `rag_index_schema`, and `rag_index_table` are not gated --
+they only touch data the caller can already see via ERMrest.
+
+```ini
+DERIVA_MCP_ADMIN_REQUIRED_CLAIM = {"groups": ["deriva-mcp-admin"]}
+```
+
+Same `claim_spec` format as `DERIVA_MCP_MUTATION_REQUIRED_CLAIM` (List values use OR
+semantics; multiple keys use AND semantics). **Unlike the mutation claim, this fails
+closed**: if `DERIVA_MCP_ADMIN_REQUIRED_CLAIM` is unset, every HTTP-mode caller is denied
+admin-only tools, not permitted. There is no kill-switch equivalent -- set the claim to
+grant access, there is nothing to flip to allow it without one. Stdio mode (single local
+user, no token) always permits admin-only tools regardless of this setting. Users who
+fail the check receive an error response and an `admin_claim_denied` audit event.
 
 ---
 
