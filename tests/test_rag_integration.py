@@ -93,6 +93,7 @@ def _chroma_settings(tmp_path: Any) -> MagicMock:
     s.vector_backend = "chroma"
     s.chroma_url = None
     s.chroma_dir = str(tmp_path / "chroma")
+    s.chroma_cache_dir = str(tmp_path / "chroma_cache")
     s.auto_update = False
     s.data_dir = str(tmp_path / "rag_data")
     return s
