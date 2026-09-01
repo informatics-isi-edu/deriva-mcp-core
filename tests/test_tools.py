@@ -191,6 +191,66 @@ class TestCatalogTools:
             result = json.loads(await tools["get_table"]("h", "1", "public", "missing"))
         assert "error" in result
 
+    async def test_invalidate_schema_cache_purges_entries(self, ctx):
+        from deriva_mcp_core.tools.catalog import _schema_cache
+        import time
+
+        _schema_cache[("host.example.org", "1", "alice")] = ({}, time.monotonic())
+        _schema_cache[("host.example.org", "1", "bob")] = ({}, time.monotonic())
+        _schema_cache[("host.example.org", "2", "alice")] = ({}, time.monotonic())
+
+        tools = self._register(ctx)
+        result = json.loads(await tools["invalidate_schema_cache"]("host.example.org", "1"))
+
+        assert result["hostname"] == "host.example.org"
+        assert result["catalog_id"] == "1"
+        assert result["entries_purged"] == 2
+        assert ("host.example.org", "1", "alice") not in _schema_cache
+        assert ("host.example.org", "1", "bob") not in _schema_cache
+        assert ("host.example.org", "2", "alice") in _schema_cache
+
+    async def test_invalidate_schema_cache_empty_cache(self, ctx):
+        tools = self._register(ctx)
+        result = json.loads(await tools["invalidate_schema_cache"]("host.example.org", "1"))
+        assert result["entries_purged"] == 0
+
+    async def test_invalidate_schema_cache_emits_audit_event(self, ctx):
+        tools = self._register(ctx)
+        with patch("deriva_mcp_core.tools.catalog.audit_event") as mock_audit:
+            result = json.loads(await tools["invalidate_schema_cache"]("host.example.org", "1"))
+        assert "error" not in result
+        mock_audit.assert_called_once_with(
+            "schema_cache_invalidated",
+            hostname="host.example.org",
+            catalog_id="1",
+            entries_purged=0,
+        )
+
+    async def test_invalidate_schema_cache_not_admin_gated_by_default(self, ctx):
+        """schema_cache_invalidation_admin_only defaults to False -- the tool must
+        succeed even for a principal that fails the admin claim."""
+        from deriva_mcp_core.context import set_admin_allowed
+
+        tools = self._register(ctx)
+        set_admin_allowed(False)
+        result = json.loads(await tools["invalidate_schema_cache"]("host.example.org", "1"))
+        assert "error" not in result
+        assert result["entries_purged"] == 0
+
+    async def test_invalidate_schema_cache_admin_gated_when_configured(self, ctx):
+        """With the setting on, a principal that fails the admin claim must be denied."""
+        from deriva_mcp_core.context import set_admin_allowed
+
+        with patch(
+            "deriva_mcp_core.tools.catalog._settings.schema_cache_invalidation_admin_only",
+            True,
+        ):
+            tools = self._register(ctx)
+        set_admin_allowed(False)
+        result = json.loads(await tools["invalidate_schema_cache"]("host.example.org", "1"))
+        assert "error" in result
+        assert "admin" in result["error"].lower()
+
     async def test_catalog_connect_hook_fired(self, ctx, mock_catalog):
         """Schema tools fire fire_catalog_connect after fetching the schema."""
         tools = self._register(ctx)

@@ -129,27 +129,28 @@ and the [Deployment Guide](docs/deployment-guide.md).
 
 ### Core settings
 
-| Variable                                  | Default                       | Description                                                                                                                                |
-|-------------------------------------------|-------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------|
-| `DERIVA_MCP_CREDENZA_URL`                 | *(required for HTTP)*         | Base URL of the Credenza instance                                                                                                          |
-| `DERIVA_MCP_SERVER_URL`                   | *(required for HTTP)*         | Public HTTPS URL of this MCP server                                                                                                        |
-| `DERIVA_MCP_SERVER_RESOURCE`              | *(required for HTTP)*         | Resource identifier for this server (usually same as SERVER_URL)                                                                           |
-| `DERIVA_MCP_CLIENT_SECRET`                | *(required for HTTP)*         | Client secret for Credenza token exchange                                                                                                  |
-| `DERIVA_MCP_CLIENT_ID`                    | `deriva-mcp`                  | Client ID registered with Credenza                                                                                                         |
-| `DERIVA_MCP_DERIVA_RESOURCE`              | `urn:deriva:rest:service:all` | Resource identifier to request in token exchange                                                                                           |
-| `DERIVA_MCP_ALLOW_ANONYMOUS`              | `false`                       | Allow unauthenticated requests (see [Anonymous Access](#anonymous-access))                                                                 |
-| `DERIVA_MCP_DISABLE_MUTATING_TOOLS`       | `true`                        | When `true`, all tools registered as mutating return an error without executing                                                            |
-| `DERIVA_MCP_PLUGIN_ALLOWLIST`             | *(unset -- allow all)*        | Comma-separated list of plugin entry point names to load; empty string disables all external plugins                                       |
-| `DERIVA_MCP_MUTATION_REQUIRED_CLAIM`      | *(unset)*                     | JSON claim spec that must match the token introspection payload before mutations are permitted (e.g. `{"groups": ["deriva-mcp-mutator"]}`) |
-| `DERIVA_MCP_ADMIN_REQUIRED_CLAIM`         | *(unset)*                     | JSON claim spec required for admin-only tools. **Fails closed when unset**, unlike the mutation claim (see below)                          |
-| `DERIVA_MCP_TOKEN_CACHE_BUFFER_SECONDS`   | `60`                          | Re-exchange derived tokens this many seconds before they expire                                                                            |
-| `DERIVA_MCP_INTROSPECT_CACHE_TTL_SECONDS` | `60`                          | How long to cache token introspection results                                                                                              |
-| `DERIVA_MCP_SCHEMA_CACHE_TTL_SECONDS`     | `900`                         | How long to cache fetched ERMrest schema documents per (catalog, user). Also bounds how quickly a user's narrowed/revoked access is reflected, since schema-mutating tools invalidate on write but permission changes are not observed |
-| `DERIVA_MCP_AUDIT_LOGFILE_PATH`           | `deriva-mcp-audit.log`        | Audit log file path (used when syslog is off)                                                                                              |
-| `DERIVA_MCP_AUDIT_USE_SYSLOG`             | `false`                       | Write audit events to syslog (`/dev/log`) instead of a file                                                                                |
-| `DERIVA_MCP_HOSTNAME_MAP`                 | `{}`                          | JSON object mapping external hostnames to internal aliases (e.g. `{"localhost":"deriva"}`)                                                 |
-| `DERIVA_MCP_SSL_VERIFY`                   | `true`                        | TLS verification for outbound calls: `true`, `false`, or path to a CA bundle                                                               |
-| `DERIVA_MCP_DEBUG`                        | `false`                       | Enable DEBUG-level logging                                                                                                                 |
+| Variable                                          | Default                       | Description                                                                                                                                                                                                                            |
+|---------------------------------------------------|-------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `DERIVA_MCP_CREDENZA_URL`                         | *(required for HTTP)*         | Base URL of the Credenza instance                                                                                                                                                                                                      |
+| `DERIVA_MCP_SERVER_URL`                           | *(required for HTTP)*         | Public HTTPS URL of this MCP server                                                                                                                                                                                                    |
+| `DERIVA_MCP_SERVER_RESOURCE`                      | *(required for HTTP)*         | Resource identifier for this server (usually same as SERVER_URL)                                                                                                                                                                       |
+| `DERIVA_MCP_CLIENT_SECRET`                        | *(required for HTTP)*         | Client secret for Credenza token exchange                                                                                                                                                                                              |
+| `DERIVA_MCP_CLIENT_ID`                            | `deriva-mcp`                  | Client ID registered with Credenza                                                                                                                                                                                                     |
+| `DERIVA_MCP_DERIVA_RESOURCE`                      | `urn:deriva:rest:service:all` | Resource identifier to request in token exchange                                                                                                                                                                                       |
+| `DERIVA_MCP_ALLOW_ANONYMOUS`                      | `false`                       | Allow unauthenticated requests (see [Anonymous Access](#anonymous-access))                                                                                                                                                             |
+| `DERIVA_MCP_DISABLE_MUTATING_TOOLS`               | `true`                        | When `true`, all tools registered as mutating return an error without executing                                                                                                                                                        |
+| `DERIVA_MCP_PLUGIN_ALLOWLIST`                     | *(unset -- allow all)*        | Comma-separated list of plugin entry point names to load; empty string disables all external plugins                                                                                                                                   |
+| `DERIVA_MCP_MUTATION_REQUIRED_CLAIM`              | *(unset)*                     | JSON claim spec that must match the token introspection payload before mutations are permitted (e.g. `{"groups": ["deriva-mcp-mutator"]}`)                                                                                             |
+| `DERIVA_MCP_ADMIN_REQUIRED_CLAIM`                 | *(unset)*                     | JSON claim spec required for admin-only tools. **Fails closed when unset**, unlike the mutation claim (see below)                                                                                                                      |
+| `DERIVA_MCP_TOKEN_CACHE_BUFFER_SECONDS`           | `60`                          | Re-exchange derived tokens this many seconds before they expire                                                                                                                                                                        |
+| `DERIVA_MCP_INTROSPECT_CACHE_TTL_SECONDS`         | `60`                          | How long to cache token introspection results                                                                                                                                                                                          |
+| `DERIVA_MCP_SCHEMA_CACHE_TTL_SECONDS`             | `900`                         | How long to cache fetched ERMrest schema documents per (catalog, user). Also bounds how quickly a user's narrowed/revoked access is reflected, since schema-mutating tools invalidate on write but permission changes are not observed |
+| `DERIVA_MCP_SCHEMA_CACHE_INVALIDATION_ADMIN_ONLY` | `false`                       | Require the admin claim for `invalidate_schema_cache`, which clears every user's cached view of a caller-named catalog (see [Admin-only tool claim gating](#admin-only-tool-claim-gating))                                             |
+| `DERIVA_MCP_AUDIT_LOGFILE_PATH`                   | `deriva-mcp-audit.log`        | Audit log file path (used when syslog is off)                                                                                                                                                                                          |
+| `DERIVA_MCP_AUDIT_USE_SYSLOG`                     | `false`                       | Write audit events to syslog (`/dev/log`) instead of a file                                                                                                                                                                            |
+| `DERIVA_MCP_HOSTNAME_MAP`                         | `{}`                          | JSON object mapping external hostnames to internal aliases (e.g. `{"localhost":"deriva"}`)                                                                                                                                             |
+| `DERIVA_MCP_SSL_VERIFY`                           | `true`                        | TLS verification for outbound calls: `true`, `false`, or path to a CA bundle                                                                                                                                                           |
+| `DERIVA_MCP_DEBUG`                                | `false`                       | Enable DEBUG-level logging                                                                                                                                                                                                             |
 
 ### RAG settings
 
@@ -289,11 +290,20 @@ controls are active.
 
 Some tools are registered with `admin=True` instead of (or alongside) `mutates=True` --
 tools that affect shared/global server state rather than the caller's own scoped data.
-Currently this covers the RAG tools that trigger full re-crawls or persist/remove
-documentation sources: `rag_ingest`, `rag_ingest_datasets`, `rag_update_docs`,
-`rag_update_docs_async`, `rag_add_source`, `rag_remove_source`, `rag_import_chunks`.
-`rag_search`, `rag_status`, `rag_index_schema`, and `rag_index_table` are not gated --
-they only touch data the caller can already see via ERMrest.
+This covers the RAG tools that trigger full re-crawls or persist/remove documentation
+sources: `rag_ingest`, `rag_ingest_datasets`, `rag_update_docs`, `rag_update_docs_async`,
+`rag_add_source`, `rag_remove_source`, `rag_import_chunks`. `rag_search`, `rag_status`,
+`rag_index_schema`, and `rag_index_table` are not gated -- they only touch data the
+caller can already see via ERMrest.
+
+`invalidate_schema_cache` is gated conditionally, via `DERIVA_MCP_SCHEMA_CACHE_INVALIDATION_ADMIN_ONLY`
+(default `false`). It clears every user's cached schema view for a caller-named catalog
+with no check that the caller has ever queried that catalog, so an unrestricted caller
+could force repeated expensive re-fetches for every other user of a catalog they simply
+named. The default favors the tool's self-service purpose (a caller who knows a schema
+changed outside this server doesn't need to find an admin); every call is audited
+(`schema_cache_invalidated` / `_failed`) regardless of this setting. Set it to `true` in
+deployments where that shared blast radius is a concern.
 
 ```ini
 DERIVA_MCP_ADMIN_REQUIRED_CLAIM = {"groups": ["deriva-mcp-admin"]}
@@ -364,6 +374,7 @@ credential access patterns, lifecycle hooks, RAG extension, and testing.
 - [Deployment Guide](docs/deployment-guide.md) -- Docker Compose, VM, reverse proxy, vector store backends
 - [ADR-0001: Async Architecture](docs/ADR-0001-async-architecture.md) -- why ASGI/uvicorn is non-negotiable for MCP services
 - [ADR-0002: Plugin-Contributed System Prompt Extensions](docs/ADR-0002-system-prompt-extensions.md) -- proposed framework for plugins to extend the chatbot's LLM system prompt (Proposed, not yet implemented)
+- [ADR-0003: Catalog Connection Memoization](docs/ADR-0003-catalog-connection-memoization.md) -- why a broader connection-object cache was evaluated and deferred in favor of the narrower schema-JSON cache (Deferred)
 
 ---
 

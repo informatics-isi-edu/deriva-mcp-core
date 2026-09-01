@@ -123,8 +123,24 @@ class Settings(BaseSettings):
     # now-too-permissive schema view for up to this many seconds. There is
     # no hook into permission-change events, so this TTL is the only bound
     # on that window. Lower it in deployments where prompt revocation of
-    # visible schema matters more than repeat-fetch cost.
+    # visible schema matters more than repeat-fetch cost. The
+    # invalidate_schema_cache tool clears a specific catalog's entries
+    # on demand instead of waiting out the TTL.
     schema_cache_ttl_seconds: int = 900
+
+    # Whether invalidate_schema_cache requires the admin claim
+    # (DERIVA_MCP_ADMIN_REQUIRED_CLAIM), in addition to whatever mutation
+    # gating applies. The tool clears every cached user's schema entries for
+    # a caller-supplied (hostname, catalog_id) with no check that the caller
+    # has ever queried that catalog, so an unrestricted caller could force
+    # repeated full re-fetches for every other user of a catalog they simply
+    # named. Default False preserves self-service use (the caller who knows
+    # a schema changed outside this server doesn't need to find an admin);
+    # set True in deployments where that shared blast radius is a concern.
+    # When True, this tool inherits the admin claim's fail-closed behavior:
+    # if DERIVA_MCP_ADMIN_REQUIRED_CLAIM is unset, the tool is denied to
+    # everyone in HTTP mode, not permitted.
+    schema_cache_invalidation_admin_only: bool = False
 
     # Audit logging
     audit_use_syslog: bool = False
