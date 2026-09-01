@@ -109,6 +109,36 @@ def is_mutation_allowed() -> bool:
     return _mutation_allowed.get()
 
 
+# Per-request admin permission. Set by the auth verifier in HTTP mode based on the
+# admin_required_claim config. Defaults to True so that stdio mode (where verify_token
+# is never called) implicitly permits admin-only tools for the local user. In HTTP
+# mode the verifier always sets this explicitly -- False when admin_required_claim is
+# not configured (fail closed), unlike mutation_allowed which fails open.
+_admin_allowed: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "admin_allowed", default=True
+)
+
+
+def set_admin_allowed(allowed: bool) -> None:
+    """Set whether the current request principal is permitted to execute admin-only tools.
+
+    Called by the auth verifier (HTTP) after evaluating the admin_required_claim
+    config against the token introspection payload. Not intended for use in tool handlers.
+    """
+    _admin_allowed.set(allowed)
+
+
+def is_admin_allowed() -> bool:
+    """Return whether the current request principal may execute admin-only tools.
+
+    Returns True in stdio mode (default, single local user). In HTTP mode, returns
+    True only if admin_required_claim is configured and the principal's token
+    satisfies it -- False both when the claim is unsatisfied and when
+    admin_required_claim is not configured at all (fail closed).
+    """
+    return _admin_allowed.get()
+
+
 # Module-level reference to the DerivedTokenCache singleton. Set by
 # _set_token_cache() in HTTP mode; None in stdio mode.
 _token_cache_ref: object | None = None

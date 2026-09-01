@@ -13,6 +13,7 @@ Introspection tools (mutates=False):
     cite                        -- Generate a Chaise citation URL for a catalog entity
     resolve_snaptime            -- Convert a human-readable date to an ERMrest snaptime string
     get_catalog_history_bounds  -- Return earliest/latest snapshot IDs for a catalog
+    invalidate_schema_cache     -- Force a fresh schema fetch on the next read
 
 Snapshot access: all introspection tools accept catalog_id as either a bare ID
 ("1") or a compound ID@snaptime string ("1@2X1234ABCD..."). Use resolve_snaptime
@@ -32,6 +33,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 import datetime
@@ -46,6 +48,7 @@ from deriva.core.ermrest_model import (
 )
 
 from . import fmt_exc
+from ..config import settings as _settings
 from ..context import (
     _set_catalog_access_fn,
     deriva_call,
@@ -112,26 +115,66 @@ def _fk_summary(fk: dict) -> dict[str, Any]:
     }
 
 
-# In-process schema cache keyed by (normalized_hostname, catalog_id).
-# Populated on every _fetch_schema() call. Stale after schema mutations but
-# refreshed the next time any catalog tool touches the same (hostname, catalog_id).
-# Used by the deriva:// resources to serve schema data without an extra round trip.
-_schema_cache: dict[tuple[str, str], dict] = {}
+# In-process schema cache keyed by (normalized_hostname, catalog_id, user_id).
+# Scoped per user because /schema is fetched with the requesting user's derived
+# token and reflects their ACL view -- an unscoped cache would leak one user's
+# visible schema (or lack thereof) to another. Consulted by _fetch_schema()
+# before re-fetching; entries older than settings.schema_cache_ttl_seconds are
+# treated as a miss. Schema-mutating tools purge their catalog's entries
+# immediately via the on_schema_change hook (see _handle_schema_change below),
+# so the TTL only bounds two kinds of staleness the hook cannot see: schema
+# changes made outside this server, and ACL/permission changes for the cached
+# user -- a user whose access is narrowed or revoked mid-session can keep
+# seeing their previously-cached, now-too-permissive view until the TTL
+# expires, since there is no hook into permission-change events. The
+# invalidate_schema_cache tool is the manual escape hatch for both cases.
+# Also used by the deriva:// resources (get_cached_schema) to serve schema
+# data without an extra round trip.
+_schema_cache: dict[tuple[str, str, str], tuple[dict, float]] = {}
 
 
-def get_cached_schema(hostname: str, catalog_id: str) -> dict | None:
-    """Return the cached schema JSON for (hostname, catalog_id), or None if cold."""
-    return _schema_cache.get((remap_hostname(hostname), catalog_id))
+def get_cached_schema(hostname: str, catalog_id: str, user_id: str) -> dict | None:
+    """Return the cached schema JSON for (hostname, catalog_id, user_id), or None if cold/stale."""
+    entry = _schema_cache.get((remap_hostname(hostname), catalog_id, user_id))
+    if entry is None:
+        return None
+    schema_json, fetched_at = entry
+    if time.monotonic() - fetched_at > _settings.schema_cache_ttl_seconds:
+        return None
+    return schema_json
+
+
+def _handle_schema_change(hostname: str, catalog_id: str) -> int:
+    """Purge cached schema entries for (hostname, catalog_id) across all users.
+
+    Registered as an on_schema_change hook (fired by schema-mutating tools in
+    schema.py, annotation.py, and vocabulary.py after a successful mutation)
+    so the next read picks up the change instead of serving a cached document
+    for up to schema_cache_ttl_seconds. Also called directly by the
+    invalidate_schema_cache tool for changes this server has no way to
+    observe (schema changes made through another client, or a user's ACL
+    access being narrowed/revoked). Returns the number of entries purged.
+    """
+    internal = remap_hostname(hostname)
+    keys = [k for k in _schema_cache if k[0] == internal and k[1] == catalog_id]
+    for key in keys:
+        del _schema_cache[key]
+    return len(keys)
 
 
 def _fetch_schema(hostname: str, catalog_id: str, user_id: str) -> dict:
-    """Fetch full schema JSON using the current credential, compute hash, fire hooks.
+    """Return schema JSON for (hostname, catalog_id, user_id), from cache when fresh.
 
     The schema is fetched with the requesting user's derived token so the
     response reflects their actual ACL view -- tables and columns they cannot
     see are absent from the response. The hash of that response is the
-    visibility-class key used by the RAG index.
+    visibility-class key used by the RAG index. Cached per (hostname,
+    catalog_id, user_id); see _schema_cache for staleness handling.
     """
+    cached = get_cached_schema(hostname, catalog_id, user_id)
+    if cached is not None:
+        return cached
+
     # Pre-claim the slot so _on_catalog_access (triggered by get_catalog below)
     # does not schedule a redundant background _fetch_schema for the same key.
     _connected_user_catalogs.add((remap_hostname(hostname), catalog_id, user_id))
@@ -140,7 +183,7 @@ def _fetch_schema(hostname: str, catalog_id: str, user_id: str) -> dict:
         # Note: deriva-py catalog.get() is a synchronous requests call.
         schema_json = catalog.get("/schema").json()
     schema_hash = _compute_schema_hash(schema_json)
-    _schema_cache[(remap_hostname(hostname), catalog_id)] = schema_json
+    _schema_cache[(remap_hostname(hostname), catalog_id, user_id)] = (schema_json, time.monotonic())
     fire_catalog_connect(hostname, catalog_id, schema_hash, schema_json)
     return schema_json
 
@@ -221,9 +264,15 @@ def _parse_snaptime(value: str) -> str:
     return _datetime_to_snaptime(dt)
 
 
+async def _on_schema_change(hostname: str, catalog_id: str) -> None:
+    """on_schema_change hook adapter: PluginContext hooks must be async callables."""
+    _handle_schema_change(hostname, catalog_id)
+
+
 def register(ctx: PluginContext) -> None:
     """Register schema introspection tools with the MCP server."""
     _set_catalog_access_fn(_on_catalog_access)
+    ctx.on_schema_change(_on_schema_change)
 
     @ctx.tool(mutates=False)
     async def get_catalog_info(hostname: str, catalog_id: str) -> str:
@@ -443,6 +492,59 @@ def register(ctx: PluginContext) -> None:
             })
         except Exception as exc:
             logger.error("get_catalog_history_bounds failed: %s", exc)
+            return json.dumps({"error": str(exc)})
+
+    @ctx.tool(mutates=False, admin=_settings.schema_cache_invalidation_admin_only)
+    async def invalidate_schema_cache(hostname: str, catalog_id: str) -> str:
+        """Force the next schema read for this catalog to re-fetch from ERMrest.
+
+        get_catalog_info, list_schemas, get_schema, and get_table cache the
+        fetched schema for up to DERIVA_MCP_SCHEMA_CACHE_TTL_SECONDS (default
+        900s). That cache is invalidated automatically when a schema change is
+        made through this server's own DDL/annotation/vocabulary tools, but it
+        has no way to observe a change made outside this server -- another
+        client, another deriva-mcp-core replica, or a direct ERMrest/database
+        change. Call this after such a change instead of waiting out the TTL.
+
+        Also useful after narrowing or revoking a user's catalog access: their
+        cached schema view reflects their ACL at fetch time and would
+        otherwise keep showing them their old (broader) view until the TTL
+        expires.
+
+        This clears the cache for every user's view of this catalog, not just
+        the caller's -- there is no check that the caller has ever queried
+        this catalog. It does not touch the DERIVA catalog itself -- nothing
+        is fetched or written, only local cache state. Every call is audited
+        (schema_cache_invalidated / _failed) even though this is a
+        mutates=False tool, specifically because of that cross-user blast
+        radius. Gated by DERIVA_MCP_SCHEMA_CACHE_INVALIDATION_ADMIN_ONLY
+        (default off) independently of the mutation kill switch.
+
+        Args:
+            hostname: Hostname of the DERIVA server.
+            catalog_id: Catalog ID or alias.
+        """
+        try:
+            purged = _handle_schema_change(hostname, catalog_id)
+            audit_event(
+                "schema_cache_invalidated",
+                hostname=hostname,
+                catalog_id=catalog_id,
+                entries_purged=purged,
+            )
+            return json.dumps({
+                "hostname": hostname,
+                "catalog_id": catalog_id,
+                "entries_purged": purged,
+            })
+        except Exception as exc:
+            logger.error("invalidate_schema_cache failed: %s", exc)
+            audit_event(
+                "schema_cache_invalidated_failed",
+                hostname=hostname,
+                catalog_id=catalog_id,
+                error_type=type(exc).__name__,
+            )
             return json.dumps({"error": str(exc)})
 
     @ctx.tool(mutates=True)

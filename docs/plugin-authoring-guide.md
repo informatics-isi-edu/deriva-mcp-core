@@ -176,6 +176,13 @@ need to check either condition -- the guard runs before your function is called.
 **`mutates=False`** -- tool is read-only (including writes to the local vector
 store, which is not the DERIVA catalog). Not affected by the mutation kill switch.
 
+**`admin=True`** -- optional, independent of `mutates=`. Use for tools that affect
+shared/global server state rather than the caller's own scoped data (e.g. registering
+a documentation source, forcing a full re-crawl). Gated by
+`DERIVA_MCP_ADMIN_REQUIRED_CLAIM`, which **fails closed**: if unset, the tool is
+denied to every HTTP-mode caller, not permitted. Combine with `mutates=True` if the
+tool also writes to the DERIVA catalog -- both guards apply independently.
+
 ### Credential Access
 
 Three functions provide access to the current request's credential. Import from

@@ -11,6 +11,8 @@ def test_defaults():
     """Optional fields have correct defaults; required-for-HTTP fields default to empty."""
     s = Settings()
     assert s.token_cache_buffer_seconds == 60
+    assert s.schema_cache_ttl_seconds == 900
+    assert s.schema_cache_invalidation_admin_only is False
     assert s.credenza_url == ""
     assert s.server_resource == ""
     assert s.deriva_resource == "urn:deriva:rest:service:all"

@@ -38,6 +38,18 @@ What is the earliest available snapshot for catalog 1 on localhost?
 Resolve the snapshot identifier 2TA-YA2D-ZDWY for catalog 1 on localhost
 ```
 
+**Cache invalidation:**
+
+Schema reads are cached briefly (see `DERIVA_MCP_SCHEMA_CACHE_TTL_SECONDS` in the
+[README](../README.md)). If a schema change was made outside this server -- another
+client, another replica, or a direct database change -- the cache won't know about it
+until the TTL expires. Force a fresh fetch instead of waiting:
+
+```
+Someone just added a column to isa:Dataset outside of this session -- invalidate the
+schema cache for catalog 1 on localhost so I can see it
+```
+
 ---
 
 ## Entity CRUD

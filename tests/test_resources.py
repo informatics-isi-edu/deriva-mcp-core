@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -144,7 +145,7 @@ async def test_server_status_rag_disabled_when_no_store(ctx):
 
 async def test_catalog_schema_returns_cached(ctx):
     from deriva_mcp_core.tools.catalog import _schema_cache
-    _schema_cache[("host.example.org", "1")] = _SCHEMA_JSON
+    _schema_cache[("host.example.org", "1", "stdio")] = (_SCHEMA_JSON, time.monotonic())
 
     resources = _register(ctx)
     fn = resources["deriva://catalog/{hostname}/{catalog_id}/schema"]
@@ -176,7 +177,7 @@ async def test_catalog_schema_fetches_live_on_cache_miss(ctx):
 
 async def test_catalog_tables_excludes_system_schemas(ctx):
     from deriva_mcp_core.tools.catalog import _schema_cache
-    _schema_cache[("host.example.org", "1")] = _SCHEMA_JSON
+    _schema_cache[("host.example.org", "1", "stdio")] = (_SCHEMA_JSON, time.monotonic())
 
     resources = _register(ctx)
     fn = resources["deriva://catalog/{hostname}/{catalog_id}/tables"]
@@ -189,7 +190,7 @@ async def test_catalog_tables_excludes_system_schemas(ctx):
 
 async def test_catalog_tables_shape(ctx):
     from deriva_mcp_core.tools.catalog import _schema_cache
-    _schema_cache[("host.example.org", "1")] = _SCHEMA_JSON
+    _schema_cache[("host.example.org", "1", "stdio")] = (_SCHEMA_JSON, time.monotonic())
 
     resources = _register(ctx)
     fn = resources["deriva://catalog/{hostname}/{catalog_id}/tables"]
@@ -209,7 +210,7 @@ async def test_catalog_tables_shape(ctx):
 
 async def test_catalog_table_returns_definition(ctx):
     from deriva_mcp_core.tools.catalog import _schema_cache
-    _schema_cache[("host.example.org", "1")] = _SCHEMA_JSON
+    _schema_cache[("host.example.org", "1", "stdio")] = (_SCHEMA_JSON, time.monotonic())
 
     resources = _register(ctx)
     fn = resources["deriva://catalog/{hostname}/{catalog_id}/table/{schema}/{table}"]
@@ -225,7 +226,7 @@ async def test_catalog_table_returns_definition(ctx):
 
 async def test_catalog_table_unknown_schema_returns_error(ctx):
     from deriva_mcp_core.tools.catalog import _schema_cache
-    _schema_cache[("host.example.org", "1")] = _SCHEMA_JSON
+    _schema_cache[("host.example.org", "1", "stdio")] = (_SCHEMA_JSON, time.monotonic())
 
     resources = _register(ctx)
     fn = resources["deriva://catalog/{hostname}/{catalog_id}/table/{schema}/{table}"]
@@ -239,7 +240,7 @@ async def test_catalog_table_unknown_schema_returns_error(ctx):
 
 async def test_catalog_table_unknown_table_returns_error(ctx):
     from deriva_mcp_core.tools.catalog import _schema_cache
-    _schema_cache[("host.example.org", "1")] = _SCHEMA_JSON
+    _schema_cache[("host.example.org", "1", "stdio")] = (_SCHEMA_JSON, time.monotonic())
 
     resources = _register(ctx)
     fn = resources["deriva://catalog/{hostname}/{catalog_id}/table/{schema}/{table}"]
@@ -273,5 +274,124 @@ def test_fetch_schema_populates_cache(ctx):
     ):
         _fetch_schema("host.example.org", "1", "user@example.org")
 
-    assert ("host.example.org", "1") in _schema_cache
-    assert _schema_cache[("host.example.org", "1")] is _SCHEMA_JSON
+    key = ("host.example.org", "1", "user@example.org")
+    assert key in _schema_cache
+    cached_schema, _fetched_at = _schema_cache[key]
+    assert cached_schema is _SCHEMA_JSON
+
+
+def test_fetch_schema_cache_hit_skips_refetch(ctx):
+    """A second _fetch_schema() call within the TTL must not touch get_catalog()."""
+    from unittest.mock import patch
+    from deriva_mcp_core.tools.catalog import _fetch_schema
+
+    mock_catalog = MagicMock()
+    resp = MagicMock()
+    resp.json.return_value = _SCHEMA_JSON
+    mock_catalog.get.return_value = resp
+
+    with (
+        patch("deriva_mcp_core.tools.catalog.get_catalog", return_value=mock_catalog) as mock_get_catalog,
+        patch("deriva_mcp_core.tools.catalog.fire_catalog_connect"),
+        patch("deriva_mcp_core.tools.catalog._connected_user_catalogs", set()),
+    ):
+        first = _fetch_schema("host.example.org", "1", "user@example.org")
+        second = _fetch_schema("host.example.org", "1", "user@example.org")
+
+    assert first is _SCHEMA_JSON
+    assert second is _SCHEMA_JSON
+    mock_get_catalog.assert_called_once()
+
+
+def test_fetch_schema_cache_expired_refetches(ctx):
+    """An entry older than schema_cache_ttl_seconds must be treated as a miss."""
+    from unittest.mock import patch
+    from deriva_mcp_core.tools.catalog import _schema_cache, _fetch_schema
+
+    mock_catalog = MagicMock()
+    resp = MagicMock()
+    resp.json.return_value = _SCHEMA_JSON
+    mock_catalog.get.return_value = resp
+
+    key = ("host.example.org", "1", "user@example.org")
+    _schema_cache[key] = ({"schemas": {}}, time.monotonic() - 100000)
+
+    with (
+        patch("deriva_mcp_core.tools.catalog.get_catalog", return_value=mock_catalog) as mock_get_catalog,
+        patch("deriva_mcp_core.tools.catalog.fire_catalog_connect"),
+        patch("deriva_mcp_core.tools.catalog._connected_user_catalogs", set()),
+    ):
+        result = _fetch_schema(*key)
+
+    mock_get_catalog.assert_called_once()
+    assert result is _SCHEMA_JSON
+
+
+def test_fetch_schema_respects_configured_ttl(ctx):
+    """A non-default schema_cache_ttl_seconds must actually be read at call time,
+    not a hardcoded constant -- proven by an entry that is fresh under the 900s
+    default but stale under a configured 1s TTL."""
+    from unittest.mock import patch
+    from deriva_mcp_core.tools.catalog import _schema_cache, _fetch_schema
+
+    mock_catalog = MagicMock()
+    resp = MagicMock()
+    resp.json.return_value = _SCHEMA_JSON
+    mock_catalog.get.return_value = resp
+
+    key = ("host.example.org", "1", "user@example.org")
+    _schema_cache[key] = ({"schemas": {}}, time.monotonic() - 5)
+
+    with (
+        patch("deriva_mcp_core.tools.catalog.get_catalog", return_value=mock_catalog) as mock_get_catalog,
+        patch("deriva_mcp_core.tools.catalog.fire_catalog_connect"),
+        patch("deriva_mcp_core.tools.catalog._connected_user_catalogs", set()),
+        patch("deriva_mcp_core.tools.catalog._settings.schema_cache_ttl_seconds", 1),
+    ):
+        result = _fetch_schema(*key)
+
+    mock_get_catalog.assert_called_once()
+    assert result is _SCHEMA_JSON
+
+
+def test_schema_change_hook_purges_all_users_for_catalog():
+    """_handle_schema_change must clear every cached user's entry for that catalog
+    but leave other catalogs/hosts untouched."""
+    from deriva_mcp_core.tools.catalog import _schema_cache, _handle_schema_change
+
+    _schema_cache[("host.example.org", "1", "alice")] = ({}, time.monotonic())
+    _schema_cache[("host.example.org", "1", "bob")] = ({}, time.monotonic())
+    _schema_cache[("host.example.org", "2", "alice")] = ({}, time.monotonic())
+    _schema_cache[("other.example.org", "1", "alice")] = ({}, time.monotonic())
+
+    _handle_schema_change("host.example.org", "1")
+
+    assert ("host.example.org", "1", "alice") not in _schema_cache
+    assert ("host.example.org", "1", "bob") not in _schema_cache
+    assert ("host.example.org", "2", "alice") in _schema_cache
+    assert ("other.example.org", "1", "alice") in _schema_cache
+
+
+async def test_get_schema_resource_scoped_per_user(ctx):
+    """The deriva:// schema resource must not serve one user's cached schema to another."""
+    from deriva_mcp_core.tools.catalog import _schema_cache
+
+    _schema_cache[("host.example.org", "1", "alice")] = (_SCHEMA_JSON, time.monotonic())
+
+    mock_catalog = MagicMock()
+    resp = MagicMock()
+    resp.json.return_value = {"schemas": {}}
+    mock_catalog.get.return_value = resp
+
+    resources = _register(ctx)
+    fn = resources["deriva://catalog/{hostname}/{catalog_id}/schema"]
+
+    with (
+        patch("deriva_mcp_core.tools.resources.resolve_user_identity", return_value="bob"),
+        patch("deriva_mcp_core.tools.resources.get_catalog", return_value=mock_catalog),
+    ):
+        result = json.loads(await fn(hostname="host.example.org", catalog_id="1"))
+
+    # bob must get a live fetch (empty schema), not alice's cached _SCHEMA_JSON
+    assert result == {"schemas": {}}
+    mock_catalog.get.assert_called_once_with("/schema")

@@ -9,7 +9,12 @@ from deriva_mcp_core.auth.introspect_cache import IntrospectionCache
 from deriva_mcp_core.auth.token_cache import DerivedTokenCache
 from deriva_mcp_core.auth.verifier import CredenzaTokenVerifier, _satisfies_claim_spec
 from deriva_mcp_core.config import Settings
-from deriva_mcp_core.context import _current_credential, _current_user_id, _mutation_allowed
+from deriva_mcp_core.context import (
+    _admin_allowed,
+    _current_credential,
+    _current_user_id,
+    _mutation_allowed,
+)
 
 _TOKEN = "mcp-bearer-token"
 _SUB = "user@example.org"
@@ -306,3 +311,57 @@ async def test_verify_token_sets_mutation_allowed_true_when_no_claim_configured(
     )
     await _make_verifier(test_settings).verify_token(_TOKEN)
     assert _mutation_allowed.get() is True
+
+
+# ---------------------------------------------------------------------------
+# Admin claim: verify_token sets _admin_allowed contextvar
+# ---------------------------------------------------------------------------
+
+
+async def test_verify_token_sets_admin_allowed_true_when_claim_matches(httpx_mock, test_settings):
+    settings = Settings(
+        **{**test_settings.model_dump(), "admin_required_claim": {"groups": ["mcp-admins"]}}
+    )
+    httpx_mock.add_response(
+        url=_introspect_url(settings),
+        json=_introspect_payload(groups=["mcp-admins", "users"]),
+    )
+    httpx_mock.add_response(
+        url=_token_url(settings), json={"access_token": _DERIVED, "expires_in": 1800}
+    )
+    await CredenzaTokenVerifier(
+        settings, DerivedTokenCache(settings), IntrospectionCache(settings)
+    ).verify_token(_TOKEN)
+    assert _admin_allowed.get() is True
+
+
+async def test_verify_token_sets_admin_allowed_false_when_claim_missing(httpx_mock, test_settings):
+    settings = Settings(
+        **{**test_settings.model_dump(), "admin_required_claim": {"groups": ["mcp-admins"]}}
+    )
+    httpx_mock.add_response(
+        url=_introspect_url(settings),
+        json=_introspect_payload(),  # no groups claim
+    )
+    httpx_mock.add_response(
+        url=_token_url(settings), json={"access_token": _DERIVED, "expires_in": 1800}
+    )
+    await CredenzaTokenVerifier(
+        settings, DerivedTokenCache(settings), IntrospectionCache(settings)
+    ).verify_token(_TOKEN)
+    assert _admin_allowed.get() is False
+
+
+async def test_verify_token_sets_admin_allowed_false_when_no_claim_configured(
+    httpx_mock, test_settings
+):
+    """Unlike mutation_allowed, admin_allowed fails closed when unconfigured."""
+    httpx_mock.add_response(
+        url=_introspect_url(test_settings),
+        json=_introspect_payload(),
+    )
+    httpx_mock.add_response(
+        url=_token_url(test_settings), json={"access_token": _DERIVED, "expires_in": 1800}
+    )
+    await _make_verifier(test_settings).verify_token(_TOKEN)
+    assert _admin_allowed.get() is False

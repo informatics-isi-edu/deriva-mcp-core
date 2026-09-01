@@ -13,7 +13,7 @@ Available resources:
     deriva://catalog/{hostname}/{catalog_id}/schema
         Full ERMrest schema JSON for the catalog. Served from the in-process
         schema cache when warm (populated by any prior catalog tool call for
-        the same hostname/catalog_id); falls back to a live ERMrest fetch.
+        the same hostname/catalog_id/caller); falls back to a live ERMrest fetch.
 
     deriva://catalog/{hostname}/{catalog_id}/tables
         Flat list of {schema, table, comment} for every non-system table.
@@ -32,7 +32,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from ..config import settings as _settings
-from ..context import deriva_call, get_catalog
+from ..context import deriva_call, get_catalog, resolve_user_identity
 from ..rag import get_rag_status, get_rag_store
 from .catalog import _SYSTEM_SCHEMAS, get_cached_schema
 
@@ -62,8 +62,14 @@ def _server_status() -> dict:
 
 
 def _get_schema(hostname: str, catalog_id: str) -> dict:
-    """Return schema JSON from cache, or fetch live and cache it."""
-    cached = get_cached_schema(hostname, catalog_id)
+    """Return schema JSON from cache, or fetch live.
+
+    Cache lookups are scoped to the calling user's identity -- /schema
+    reflects the requester's ACL view, so an unscoped cache would risk
+    serving one user's visible schema to another.
+    """
+    user_id = resolve_user_identity(hostname)
+    cached = get_cached_schema(hostname, catalog_id, user_id)
     if cached is not None:
         return cached
     with deriva_call():

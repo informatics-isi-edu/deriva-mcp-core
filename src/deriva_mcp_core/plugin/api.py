@@ -49,7 +49,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ..context import get_request_bearer_token, get_request_user_id, is_mutation_allowed
+from ..context import (
+    get_request_bearer_token,
+    get_request_user_id,
+    is_admin_allowed,
+    is_mutation_allowed,
+)
 from ..telemetry import audit_event
 
 if TYPE_CHECKING:
@@ -126,6 +131,9 @@ _MUTATIONS_DISABLED_RESPONSE = json.dumps(
 _MUTATIONS_NOT_PERMITTED_RESPONSE = json.dumps(
     {"error": "catalog mutations are not permitted for your account"}
 )
+_ADMIN_REQUIRED_RESPONSE = json.dumps(
+    {"error": "this tool requires an admin claim not present on your account"}
+)
 
 
 class PluginContext:
@@ -159,7 +167,9 @@ class PluginContext:
     # MCP registration decorators -- delegate directly to FastMCP
     # ------------------------------------------------------------------
 
-    def tool(self, *args: Any, mutates: Any = _UNSET, **kwargs: Any) -> Callable:
+    def tool(
+        self, *args: Any, mutates: Any = _UNSET, admin: bool = False, **kwargs: Any
+    ) -> Callable:
         """Decorator to register an MCP tool.
 
         mutates= is required. Pass mutates=True for tools that write to the DERIVA
@@ -169,6 +179,14 @@ class PluginContext:
 
         When DERIVA_MCP_DISABLE_MUTATING_TOOLS=true, tools registered with
         mutates=True return an error response without executing.
+
+        admin=True marks a tool as admin-only, independent of mutates -- for tools
+        that affect shared/global server state rather than the caller's own scoped
+        data (e.g. RAG source management, full reindex triggers). Gated per-request
+        by context.is_admin_allowed(), which the auth verifier sets from the
+        DERIVA_MCP_ADMIN_REQUIRED_CLAIM setting. Fails closed in HTTP mode: if that
+        claim is not configured, admin=True tools are denied to everyone rather than
+        left open.
 
         All other arguments are forwarded to FastMCP.tool().
         """
@@ -183,24 +201,28 @@ class PluginContext:
 
         mcp_decorator = self._mcp.tool(*args, **kwargs)
 
-        needs_guard = mutates and (
+        needs_mutation_guard = mutates and (
             self._disable_mutating_tools or self._mutation_required_claim is not None
         )
-        if not needs_guard:
+        if not needs_mutation_guard and not admin:
             return mcp_decorator
 
-        # mutates=True and at least one guard is active -- wrap with per-call check
+        # At least one guard is active -- wrap with per-call checks.
         disable = self._disable_mutating_tools
         claim_spec = self._mutation_required_claim
 
         def decorator(fn: Callable) -> Callable:
             @functools.wraps(fn)
             async def guarded(*a: Any, **kw: Any) -> Any:
-                if disable:
-                    return _MUTATIONS_DISABLED_RESPONSE
-                if claim_spec is not None and not is_mutation_allowed():
-                    audit_event("mutation_claim_denied")
-                    return _MUTATIONS_NOT_PERMITTED_RESPONSE
+                if needs_mutation_guard:
+                    if disable:
+                        return _MUTATIONS_DISABLED_RESPONSE
+                    if claim_spec is not None and not is_mutation_allowed():
+                        audit_event("mutation_claim_denied")
+                        return _MUTATIONS_NOT_PERMITTED_RESPONSE
+                if admin and not is_admin_allowed():
+                    audit_event("admin_claim_denied")
+                    return _ADMIN_REQUIRED_RESPONSE
                 return await fn(*a, **kw)
 
             return mcp_decorator(guarded)

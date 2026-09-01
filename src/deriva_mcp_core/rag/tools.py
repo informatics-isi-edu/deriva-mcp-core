@@ -505,7 +505,7 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
             logger.error("rag_search failed: %s", exc, exc_info=True)
             return json.dumps({"error": str(exc)})
 
-    @ctx.tool(mutates=False)
+    @ctx.tool(mutates=False, admin=True)
     async def rag_update_docs(
         source_name: str | None = None,
         force: bool = False,
@@ -534,7 +534,7 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
             logger.error("rag_update_docs failed: %s", exc, exc_info=True)
             return json.dumps({"error": str(exc)})
 
-    @ctx.tool(mutates=False)
+    @ctx.tool(mutates=False, admin=True)
     async def rag_update_docs_async(
         source_name: str | None = None,
         force: bool = False,
@@ -709,7 +709,7 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
             logger.error("rag_status failed: %s", exc, exc_info=True)
             return json.dumps({"error": str(exc)})
 
-    @ctx.tool(mutates=False)
+    @ctx.tool(mutates=False, admin=True)
     async def rag_ingest(source_name: str | None = None) -> str:
         """Force a full re-crawl and reindex as a background task. Returns task_id immediately.
 
@@ -765,7 +765,7 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
             return json.dumps({"error": str(exc)})
         return json.dumps({"task_id": task_id, "status": "submitted"})
 
-    @ctx.tool(mutates=False)
+    @ctx.tool(mutates=False, admin=True)
     async def rag_add_source(
         name: str,
         repo_owner: str,
@@ -811,7 +811,7 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
             logger.error("rag_add_source failed: %s", exc, exc_info=True)
             return json.dumps({"error": str(exc)})
 
-    @ctx.tool(mutates=False)
+    @ctx.tool(mutates=False, admin=True)
     async def rag_remove_source(name: str) -> str:
         """Remove a runtime-added documentation source and delete its indexed chunks.
 
@@ -842,7 +842,7 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
             logger.error("rag_remove_source failed: %s", exc, exc_info=True)
             return json.dumps({"error": str(exc)})
 
-    @ctx.tool(mutates=False)
+    @ctx.tool(mutates=False, admin=True)
     async def rag_import_chunks(
         file_path: str,
         source_name: str | None = None,
@@ -916,7 +916,7 @@ def register(ctx: PluginContext, env_file: str | None = None) -> None:
 
         return json.dumps({"status": "imported", "chunk_count": total})
 
-    @ctx.tool(mutates=False)
+    @ctx.tool(mutates=False, admin=True)
     async def rag_ingest_datasets(
         hostname: str,
         catalog_id: str,
