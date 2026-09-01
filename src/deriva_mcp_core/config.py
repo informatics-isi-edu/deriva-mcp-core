@@ -110,6 +110,22 @@ class Settings(BaseSettings):
     token_cache_buffer_seconds: int = 60
     introspect_cache_ttl_seconds: int = 60
 
+    # Schema cache tuning. The full ERMrest /schema document is expensive to
+    # generate server-side and is fetched with the requesting user's derived
+    # token (so it reflects their ACL view), so it is cached per (hostname,
+    # catalog_id, user). Schema-mutating tools invalidate their catalog's
+    # entries immediately on success (see plugin on_schema_change hook in
+    # tools/catalog.py), so this TTL only bounds two kinds of staleness the
+    # invalidation hook cannot see: (1) schema changes made outside this
+    # server (another client, another replica), and (2) ACL/permission
+    # changes for the cached user -- if a user's access is narrowed or
+    # revoked mid-session, they can keep seeing their previously-cached,
+    # now-too-permissive schema view for up to this many seconds. There is
+    # no hook into permission-change events, so this TTL is the only bound
+    # on that window. Lower it in deployments where prompt revocation of
+    # visible schema matters more than repeat-fetch cost.
+    schema_cache_ttl_seconds: int = 900
+
     # Audit logging
     audit_use_syslog: bool = False
 

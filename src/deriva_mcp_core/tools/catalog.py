@@ -32,6 +32,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 import datetime
@@ -46,6 +47,7 @@ from deriva.core.ermrest_model import (
 )
 
 from . import fmt_exc
+from ..config import settings as _settings
 from ..context import (
     _set_catalog_access_fn,
     deriva_call,
@@ -112,26 +114,60 @@ def _fk_summary(fk: dict) -> dict[str, Any]:
     }
 
 
-# In-process schema cache keyed by (normalized_hostname, catalog_id).
-# Populated on every _fetch_schema() call. Stale after schema mutations but
-# refreshed the next time any catalog tool touches the same (hostname, catalog_id).
-# Used by the deriva:// resources to serve schema data without an extra round trip.
-_schema_cache: dict[tuple[str, str], dict] = {}
+# In-process schema cache keyed by (normalized_hostname, catalog_id, user_id).
+# Scoped per user because /schema is fetched with the requesting user's derived
+# token and reflects their ACL view -- an unscoped cache would leak one user's
+# visible schema (or lack thereof) to another. Consulted by _fetch_schema()
+# before re-fetching; entries older than settings.schema_cache_ttl_seconds are
+# treated as a miss. Schema-mutating tools purge their catalog's entries
+# immediately via the on_schema_change hook (see _handle_schema_change below),
+# so the TTL only bounds two kinds of staleness the hook cannot see: schema
+# changes made outside this server, and ACL/permission changes for the cached
+# user -- a user whose access is narrowed or revoked mid-session can keep
+# seeing their previously-cached, now-too-permissive view until the TTL
+# expires, since there is no hook into permission-change events. Also used by
+# the deriva:// resources (get_cached_schema) to serve schema data without an
+# extra round trip.
+_schema_cache: dict[tuple[str, str, str], tuple[dict, float]] = {}
 
 
-def get_cached_schema(hostname: str, catalog_id: str) -> dict | None:
-    """Return the cached schema JSON for (hostname, catalog_id), or None if cold."""
-    return _schema_cache.get((remap_hostname(hostname), catalog_id))
+def get_cached_schema(hostname: str, catalog_id: str, user_id: str) -> dict | None:
+    """Return the cached schema JSON for (hostname, catalog_id, user_id), or None if cold/stale."""
+    entry = _schema_cache.get((remap_hostname(hostname), catalog_id, user_id))
+    if entry is None:
+        return None
+    schema_json, fetched_at = entry
+    if time.monotonic() - fetched_at > _settings.schema_cache_ttl_seconds:
+        return None
+    return schema_json
+
+
+def _handle_schema_change(hostname: str, catalog_id: str) -> None:
+    """Purge cached schema entries for (hostname, catalog_id) across all users.
+
+    Registered as an on_schema_change hook (fired by schema-mutating tools in
+    schema.py, annotation.py, and vocabulary.py after a successful mutation)
+    so the next read picks up the change instead of serving a cached document
+    for up to schema_cache_ttl_seconds.
+    """
+    internal = remap_hostname(hostname)
+    for key in [k for k in _schema_cache if k[0] == internal and k[1] == catalog_id]:
+        del _schema_cache[key]
 
 
 def _fetch_schema(hostname: str, catalog_id: str, user_id: str) -> dict:
-    """Fetch full schema JSON using the current credential, compute hash, fire hooks.
+    """Return schema JSON for (hostname, catalog_id, user_id), from cache when fresh.
 
     The schema is fetched with the requesting user's derived token so the
     response reflects their actual ACL view -- tables and columns they cannot
     see are absent from the response. The hash of that response is the
-    visibility-class key used by the RAG index.
+    visibility-class key used by the RAG index. Cached per (hostname,
+    catalog_id, user_id); see _schema_cache for staleness handling.
     """
+    cached = get_cached_schema(hostname, catalog_id, user_id)
+    if cached is not None:
+        return cached
+
     # Pre-claim the slot so _on_catalog_access (triggered by get_catalog below)
     # does not schedule a redundant background _fetch_schema for the same key.
     _connected_user_catalogs.add((remap_hostname(hostname), catalog_id, user_id))
@@ -140,7 +176,7 @@ def _fetch_schema(hostname: str, catalog_id: str, user_id: str) -> dict:
         # Note: deriva-py catalog.get() is a synchronous requests call.
         schema_json = catalog.get("/schema").json()
     schema_hash = _compute_schema_hash(schema_json)
-    _schema_cache[(remap_hostname(hostname), catalog_id)] = schema_json
+    _schema_cache[(remap_hostname(hostname), catalog_id, user_id)] = (schema_json, time.monotonic())
     fire_catalog_connect(hostname, catalog_id, schema_hash, schema_json)
     return schema_json
 
@@ -221,9 +257,15 @@ def _parse_snaptime(value: str) -> str:
     return _datetime_to_snaptime(dt)
 
 
+async def _on_schema_change(hostname: str, catalog_id: str) -> None:
+    """on_schema_change hook adapter: PluginContext hooks must be async callables."""
+    _handle_schema_change(hostname, catalog_id)
+
+
 def register(ctx: PluginContext) -> None:
     """Register schema introspection tools with the MCP server."""
     _set_catalog_access_fn(_on_catalog_access)
+    ctx.on_schema_change(_on_schema_change)
 
     @ctx.tool(mutates=False)
     async def get_catalog_info(hostname: str, catalog_id: str) -> str:

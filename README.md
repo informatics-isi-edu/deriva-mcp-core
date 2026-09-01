@@ -19,7 +19,9 @@ with per-request OAuth authentication via [Credenza](https://github.com/informat
 - [Safety Controls](#safety-controls)
     - [Anonymous Access](#anonymous-access)
 - [Plugin Framework](#plugin-framework)
+- [Further Reading](#further-reading)
 - [Health Endpoint](#health-endpoint)
+- [Development Status](#development-status)
 
 ---
 
@@ -142,6 +144,7 @@ and the [Deployment Guide](docs/deployment-guide.md).
 | `DERIVA_MCP_ADMIN_REQUIRED_CLAIM`         | *(unset)*                     | JSON claim spec required for admin-only tools. **Fails closed when unset**, unlike the mutation claim (see below)                          |
 | `DERIVA_MCP_TOKEN_CACHE_BUFFER_SECONDS`   | `60`                          | Re-exchange derived tokens this many seconds before they expire                                                                            |
 | `DERIVA_MCP_INTROSPECT_CACHE_TTL_SECONDS` | `60`                          | How long to cache token introspection results                                                                                              |
+| `DERIVA_MCP_SCHEMA_CACHE_TTL_SECONDS`     | `900`                         | How long to cache fetched ERMrest schema documents per (catalog, user). Also bounds how quickly a user's narrowed/revoked access is reflected, since schema-mutating tools invalidate on write but permission changes are not observed |
 | `DERIVA_MCP_AUDIT_LOGFILE_PATH`           | `deriva-mcp-audit.log`        | Audit log file path (used when syslog is off)                                                                                              |
 | `DERIVA_MCP_AUDIT_USE_SYSLOG`             | `false`                       | Write audit events to syslog (`/dev/log`) instead of a file                                                                                |
 | `DERIVA_MCP_HOSTNAME_MAP`                 | `{}`                          | JSON object mapping external hostnames to internal aliases (e.g. `{"localhost":"deriva"}`)                                                 |
